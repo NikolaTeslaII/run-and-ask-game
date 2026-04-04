@@ -59,13 +59,12 @@ const C = {
     // Particle Pool size
     PARTICLE_POOL: 50,
 
-    // Sky System
+    // Sky System (Urban/Sunny Style)
     SKY_MODES: [
-        { name: 'Midnight', bg: 0x0a0e1b, fog: 0x0a0e1b, ambient: 0.35, sun: 0.25 },
-        { name: 'Dawn', bg: 0x4a3c61, fog: 0x4a3c61, ambient: 0.55, sun: 0.65 },
-        { name: 'Day', bg: 0x3d7cc9, fog: 0x3d7cc9, ambient: 0.75, sun: 0.95 },
-        { name: 'Sunset', bg: 0xff5e3a, fog: 0xff5e3a, ambient: 0.6, sun: 0.8 },
-        { name: 'Cyber', bg: 0x110d26, fog: 0x110d26, ambient: 0.45, sun: 0.55 },
+        { name: 'Morning', bg: 0x87CEEB, fog: 0x87CEEB, ambient: 0.8, sun: 0.95 },
+        { name: 'Daylight', bg: 0x4fc3f7, fog: 0x4fc3f7, ambient: 0.85, sun: 1.0 },
+        { name: 'Afternoon', bg: 0xffb74d, fog: 0xffb74d, ambient: 0.7, sun: 0.85 },
+        { name: 'Sunset', bg: 0xe67e22, fog: 0xe67e22, ambient: 0.6, sun: 0.75 },
     ],
     SKY_CYCLE_DUR: 25, // seconds per phase
 };
@@ -174,28 +173,27 @@ const GEO = {
     cyl_pole: new THREE.CylinderGeometry(0.1, 0.1, 3, 6),
 };
 
-// ─── Shared Materials (PBR Upgrade) ─────────────────────────────
+// ─── Shared Materials (Urban PBR Upgrade) ───────────────────────
 const MAT = {
-    coin: new THREE.MeshStandardMaterial({ color: 0xffd700, metalness: 0.8, roughness: 0.2, emissive: 0xffa500, emissiveIntensity: 0.5 }),
+    coin: new THREE.MeshStandardMaterial({ color: 0xffd700, metalness: 0.8, roughness: 0.2, emissive: 0xffa500, emissiveIntensity: 0.3 }),
     particle: new THREE.MeshBasicMaterial({ color: 0xffd28f, transparent: true }),
-    track: new THREE.MeshStandardMaterial({ color: 0x1a1a1a, roughness: 0.8 }),
-    lane: new THREE.MeshStandardMaterial({ color: 0x222222, roughness: 0.6 }),
-    border: new THREE.MeshStandardMaterial({ color: 0xffcc00, metalness: 0.5, roughness: 0.3 }),
-    sidewalk: new THREE.MeshStandardMaterial({ color: 0x0f0f0f, roughness: 0.9 }),
+    track: new THREE.MeshStandardMaterial({ color: 0x444444, roughness: 0.8 }),
+    lane: new THREE.MeshStandardMaterial({ color: 0x555555, roughness: 0.6 }),
+    border: new THREE.MeshStandardMaterial({ color: 0xffcc00, metalness: 0.3, roughness: 0.4 }),
+    sidewalk: new THREE.MeshStandardMaterial({ color: 0xcccccc, roughness: 0.9 }),
     building: [
-        new THREE.MeshStandardMaterial({ color: 0x111111, metalness: 0.2, roughness: 0.8 }),
-        new THREE.MeshStandardMaterial({ color: 0x1a1a1a, metalness: 0.3, roughness: 0.7 }),
+        new THREE.MeshStandardMaterial({ color: 0xeeeeee, metalness: 0.1, roughness: 0.8 }),
+        new THREE.MeshStandardMaterial({ color: 0xdddddd, metalness: 0.1, roughness: 0.7 }),
     ],
-    window: new THREE.MeshStandardMaterial({ color: 0x66ccff, emissive: 0x3399ff, emissiveIntensity: 1.0 }),
+    window: new THREE.MeshStandardMaterial({ color: 0xaaddff, metalness: 0.5, roughness: 0.1 }),
     // Obstacle Materials
     red: new THREE.MeshStandardMaterial({ color: 0xd32f2f, roughness: 0.5 }),
     orange: new THREE.MeshStandardMaterial({ color: 0xf57c00, roughness: 0.4 }),
     yellow: new THREE.MeshStandardMaterial({ color: 0xfbc02d, roughness: 0.3 }),
-    white: new THREE.MeshStandardMaterial({ color: 0xeeeeee, roughness: 0.9 }),
-    metal: new THREE.MeshStandardMaterial({ color: 0x9e9e9e, metalness: 0.8, roughness: 0.2 }),
-    dark: new THREE.MeshStandardMaterial({ color: 0x212121, roughness: 0.9 }),
-    neonBlue: new THREE.MeshStandardMaterial({ color: 0x00e5ff, emissive: 0x00e5ff, emissiveIntensity: 2 }),
-    neonRed: new THREE.MeshStandardMaterial({ color: 0xff1744, emissive: 0xff1744, emissiveIntensity: 2.5 }),
+    white: new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.9 }),
+    metal: new THREE.MeshStandardMaterial({ color: 0xbdc3c7, metalness: 0.8, roughness: 0.2 }),
+    dark: new THREE.MeshStandardMaterial({ color: 0x333333, roughness: 0.9 }),
+    blue: new THREE.MeshStandardMaterial({ color: 0x2980b9, roughness: 0.4 }),
 };
 
 /**
@@ -230,9 +228,9 @@ const OBS_BUILDERS = [
                 const s = new THREE.Mesh(new THREE.BoxGeometry(2.15, 1.4, 0.9), MAT.metal);
                 s.position.set(0, 1.2, i); g.add(s);
             }
-            // Roof lights
+            // Roof lights (Now standard bright lights)
             for(let i=-5; i<=5; i+=2.5) {
-                const l = new THREE.Mesh(new THREE.BoxGeometry(0.8, 0.1, 0.8), MAT.neonBlue);
+                const l = new THREE.Mesh(new THREE.BoxGeometry(0.8, 0.1, 0.8), MAT.yellow);
                 l.position.set(0, 2.41, i); g.add(l);
             }
             // Wheels
@@ -290,8 +288,8 @@ const OBS_BUILDERS = [
             // Top Arch
             const arch = new THREE.Mesh(new THREE.BoxGeometry(3.6, 0.6, 0.6), MAT.red);
             arch.position.y = 2.4; g.add(arch);
-            // Neon Sign "DANGER"
-            const sign = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.8, 0.1), MAT.neonRed);
+            // Sign "DANGER" (Now bright orange/safe look)
+            const sign = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.8, 0.1), MAT.orange);
             sign.position.set(0, 2.4, 0.31); g.add(sign);
             return g;
         }
@@ -328,9 +326,9 @@ const OBS_BUILDERS = [
 // ═══════════════════════════════════════════
 function initThree() {
     scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x111520);
-    // Exponential fog - nhẹ hơn linear, nhìn đẹp hơn
-    scene.fog = new THREE.FogExp2(0x111520, 0.015);
+    scene.background = new THREE.Color(0x87CEEB); // Sky Blue
+    // Linear fog for a natural bright look
+    scene.fog = new THREE.Fog(0x87CEEB, 20, 120);
 
     camera = new THREE.PerspectiveCamera(62, window.innerWidth / window.innerHeight, 0.1, 130);
     camera.position.set(0, 5, 10);
@@ -351,15 +349,15 @@ function initThree() {
     root.insertBefore(renderer.domElement, root.firstChild);
     renderer.domElement.style.cssText = 'position:absolute;inset:0;z-index:0;width:100% !important;height:100% !important;';
 
-    // Lighting
-    scene.add(new THREE.AmbientLight(0xffffff, 0.65));
-    const sun = new THREE.DirectionalLight(0xfff5e0, 0.9);
+    // Lighting (Brighter for Daylight)
+    scene.add(new THREE.AmbientLight(0xffffff, 0.85));
+    const sun = new THREE.DirectionalLight(0xfff5e0, 1.0);
     sun.position.set(8, 20, 5);
     scene.add(sun);
-    // Cool rim light from behind
-    const rim = new THREE.DirectionalLight(0x446aff, 0.35);
-    rim.position.set(-6, 4, -15);
-    scene.add(rim);
+    // Warm fill light
+    const fill = new THREE.DirectionalLight(0xffffff, 0.4);
+    fill.position.set(-6, 4, -15);
+    scene.add(fill);
 
     setupInput();
 
