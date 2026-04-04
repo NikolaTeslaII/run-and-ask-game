@@ -73,7 +73,15 @@ const C = {
 // ═══════════════════════════════════════════
 // 2. GAME STATE (single truth object)
 // ═══════════════════════════════════════════
-let G = {};
+let G = {
+    running: false,
+    paused: false,
+    quizActive: false,
+    invincible: false,
+    lastTime: 0,
+    speed: C.SPEED_START,
+    playerName: localStorage.getItem('httt_player_name') || ''
+};
 const DOM = {}; // Cached elements
 
 function resetGameState(keepMeta = false) {
@@ -129,8 +137,7 @@ function resetGameState(keepMeta = false) {
         playerGroup.rotation.set(0, 0, 0);
     }
 }
-// Init immediately to avoid NaN physics
-resetGameState();
+
 
 // ═══════════════════════════════════════════
 // 3. THREE.JS OBJECTS
@@ -615,7 +622,7 @@ function initThree() {
     // Exponential fog - nhẹ hơn linear, nhìn đẹp hơn
     scene.fog = new THREE.FogExp2(0x111520, 0.015);
 
-    camera = new THREE.PerspectiveCamera(62, innerWidth / innerHeight, 0.1, 130);
+    camera = new THREE.PerspectiveCamera(62, window.innerWidth / window.innerHeight, 0.1, 130);
     camera.position.set(0, 5, 10);
     camera.lookAt(0, 2, -5);
 
@@ -624,8 +631,8 @@ function initThree() {
         antialias: false,
         powerPreference: 'high-performance',
     });
-    renderer.setPixelRatio(Math.min(devicePixelRatio, 1.5));
-    renderer.setSize(innerWidth, innerHeight);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
+    renderer.setSize(window.innerWidth, window.innerHeight);
     renderer.shadowMap.enabled = false;
     renderer.sortObjects = false;
     renderer.autoClearColor = true;
@@ -1688,8 +1695,8 @@ function initBgCanvas() {
     const canvas = document.getElementById('bg-canvas');
     if (!canvas) return;
     const ctx2d = canvas.getContext('2d');
-    canvas.width = innerWidth;
-    canvas.height = innerHeight;
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
 
     const dots = Array.from({ length: 45 }, () => ({
         x: Math.random() * canvas.width,
@@ -1740,7 +1747,10 @@ function initBgCanvas() {
     drawBg();
 
     window.addEventListener('resize', () => {
-        canvas.width = innerWidth; canvas.height = innerHeight;
+        if(canvas) {
+            canvas.width = window.innerWidth; 
+            canvas.height = window.innerHeight;
+        }
     });
 }
 
