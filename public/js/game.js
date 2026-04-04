@@ -1,0 +1,1939 @@
+/**
+ * ================================================================
+ * GAME.JS - Core Engine "Hành Trình Tri Thức" - Professional Edition
+ *
+ * Tối ưu hoá:
+ * - Procedural 3D character (không phải 1 cube đơn giản)
+ * - Object Pooling cho obstacles, particles, coins
+ * - Frustum Culling tự triển khai cho obstacles
+ * - Frame-accurate input queue (không mất key press)
+ * - DT clamped + adaptive quality
+ * - Không Shadow Maps
+ * - Track scrolling Pool (5 đoạn đường tái sử dụng)
+ * - Particle system (dust trail, impact)
+ * - Coin collect system
+ * - Pause Menu
+ * - Background particle canvas trên Start screen
+ * ================================================================
+ */
+
+// ═══════════════════════════════════════════
+// 1. CONSTANTS
+// ═══════════════════════════════════════════
+const C = {
+    // Làn đường sát nhau — khoảng cách 2.2 units
+    LANES: [-2.4, 0, 2.4],
+    TRACK_W: 7.2,
+    // Tốc độ chuyển làn cao → nhạy, không bị delay
+    // Dùng snap khi đủ gần để loại bỏ cảm giác trễ
+    LANE_LERP: 28,
+    LANE_SNAP: 0.04,   // Snap threshold (units)
+
+    // Spawn / Despawn
+    SPAWN_Z: -65,
+    DESPAWN_Z: 10,
+    COIN_SPAWN_Z: -55,
+
+    // Speed
+    SPEED_START: 15,
+    SPEED_ACCEL: 0.35,  // Increased from 0.25 (Faster ramp up)
+    SPEED_MAX: 65,     // Increased from 55 (Higher skill ceiling)
+
+    // Physics — nhảy nhạy hơn
+    JUMP_FORCE: 13.5,
+    GRAVITY: -32,
+    PLAYER_Y: 1.05,
+    SLIDE_DUR: 0.55,
+    PLAYER_STAND_H: 2.1,   // Chiều cao player đứng (top)
+    PLAYER_SLIDE_H: 0.85,  // Chiều cao player trượt (top)
+
+    // Timings
+    DT_MAX: 0.05,
+    INVINCIBLE_DUR: 2.5,
+    QUIZ_TIMEOUT: 12,
+
+    // Track Pool
+    SEG_LEN: 40,
+    SEG_COUNT: 6,
+
+    // Particle Pool size
+    PARTICLE_POOL: 50,
+
+    // Sky System
+    SKY_MODES: [
+        { name: 'Midnight', bg: 0x0a0e1b, fog: 0x0a0e1b, ambient: 0.35, sun: 0.25 },
+        { name: 'Dawn', bg: 0x4a3c61, fog: 0x4a3c61, ambient: 0.55, sun: 0.65 },
+        { name: 'Day', bg: 0x3d7cc9, fog: 0x3d7cc9, ambient: 0.75, sun: 0.95 },
+        { name: 'Sunset', bg: 0xff5e3a, fog: 0xff5e3a, ambient: 0.6, sun: 0.8 },
+        { name: 'Cyber', bg: 0x110d26, fog: 0x110d26, ambient: 0.45, sun: 0.55 },
+    ],
+    SKY_CYCLE_DUR: 25, // seconds per phase
+};
+
+// ═══════════════════════════════════════════
+// 2. GAME STATE (single truth object)
+// ═══════════════════════════════════════════
+let G = {};
+const DOM = {}; // Cached elements
+
+function resetGameState(keepMeta = false) {
+    const prevName = G.playerName;
+    const prevMode = G.mode || 1;
+
+    G = {
+        // Core
+        running: false,
+        paused: false,
+        quizActive: false,
+        invincible: false,
+        invTimer: 0,
+        // Player
+        laneIdx: 1,
+        targetX: C.LANES[1],
+        velY: 0,
+        jumping: false,
+        sliding: false,
+        slideTimer: 0,
+        // Input queue for frame-accurate requests
+        inputQueue: [],
+        // Score / Stats
+        speed: C.SPEED_START,
+        dist: 0,
+        score: 0,
+        coins: 0,
+        correctAnswers: 0,
+        maxSpeed: 0,
+        // Quiz streak
+        reviveStreak: 0,
+        // Time
+        lastTime: 0,
+        spawnCooldown: 1.0,
+        coinSpawnCd: 0.8,
+        // Sky
+        skyTime: 0,
+        skyIdx: 0,
+        stars: null,
+        // Meta
+        playerName: keepMeta ? prevName : (localStorage.getItem('httt_player_name') || ''),
+        mode: keepMeta ? prevMode : 1,
+        // Cached refs
+        pc: {},
+    };
+
+    if (camera) {
+        camera.position.set(0, 5, 10);
+        camera.lookAt(0, 2, -5);
+    }
+    if (playerGroup) {
+        playerGroup.position.set(C.LANES[1], C.PLAYER_Y, 0);
+        playerGroup.rotation.set(0, 0, 0);
+    }
+}
+// Init immediately to avoid NaN physics
+resetGameState();
+
+// ═══════════════════════════════════════════
+// 3. THREE.JS OBJECTS
+// ═══════════════════════════════════════════
+let scene, camera, renderer, clock;
+let playerGroup, playerMat, playerAccentMat;
+let trackSegs = [];
+let envGroup;
+const _tmpColA = new THREE.Color();
+const _tmpColB = new THREE.Color();
+
+// Object pools
+let obstaclePool = [];
+let coinPool = [];
+let particlePool = [];
+
+let activeObstacles = [];
+let activeCoins = [];
+let activeParticles = [];
+
+let collisionObs = null;
+let quizTimer = null;
+let quizCountdown = null;
+
+// ─── Shared Geometries ───────────────────────────────────────────
+const GEO = {
+    // Basic reusable
+    coin: new THREE.CylinderGeometry(0.35, 0.35, 0.12, 12),
+    particle: new THREE.SphereGeometry(0.12, 4, 3),
+    // Building blocks
+    box_s: new THREE.BoxGeometry(0.3, 0.3, 0.5),     // small detail
+    cyl_pole: new THREE.CylinderGeometry(0.1, 0.1, 3, 6),
+};
+
+// ─── Shared Materials ────────────────────────────────────────────
+const MAT = {
+    coin: new THREE.MeshLambertMaterial({ color: 0xffd700, emissive: 0xffd700, emissiveIntensity: 0.3 }),
+    particle: new THREE.MeshBasicMaterial({ color: 0xffd28f }),
+    track: new THREE.MeshLambertMaterial({ color: 0x252d3a }),
+    lane: new THREE.MeshLambertMaterial({ color: 0x3d4860 }),
+    border: new THREE.MeshLambertMaterial({ color: 0xf0a500 }),
+    sidewalk: new THREE.MeshLambertMaterial({ color: 0x1c2330 }),
+    building: [
+        new THREE.MeshLambertMaterial({ color: 0x1a2535 }),
+        new THREE.MeshLambertMaterial({ color: 0x172030 }),
+        new THREE.MeshLambertMaterial({ color: 0x1d2a3a }),
+        new THREE.MeshLambertMaterial({ color: 0x111d2c }),
+    ],
+    window: new THREE.MeshLambertMaterial({ color: 0xfff0b0, emissive: 0xffd060, emissiveIntensity: 0.5 }),
+    // Obstacle colors
+    red: new THREE.MeshLambertMaterial({ color: 0xe74c3c }),
+    orange: new THREE.MeshLambertMaterial({ color: 0xe67e22 }),
+    purple: new THREE.MeshLambertMaterial({ color: 0x8e44ad }),
+    grey: new THREE.MeshLambertMaterial({ color: 0x7f8c8d }),
+    darkRed: new THREE.MeshLambertMaterial({ color: 0xb03a2e }),
+    blue: new THREE.MeshLambertMaterial({ color: 0x2980b9 }),
+    green: new THREE.MeshLambertMaterial({ color: 0x27ae60 }),
+    yellow: new THREE.MeshLambertMaterial({ color: 0xf1c40f }),
+    white: new THREE.MeshLambertMaterial({ color: 0xecf0f1 }),
+    metal: new THREE.MeshLambertMaterial({ color: 0x95a5a6 }),
+    dark: new THREE.MeshLambertMaterial({ color: 0x2c3e50 }),
+};
+
+/**
+ * OBS_TYPES — Định nghĩa các kiểu chướng ngại vật
+ * Mỗi type là một hàm builder trả về THREE.Group
+ * và metadata cho collision detection:
+ *   slideBottom: y-position của cạnh dưới cùng của obstacle
+ *                Nếu player đang slide (top ~0.95), slideBottom > 0.95 → có thể chui qua
+ *   jumpTop: chiều cao tối thiểu player cần nhảy TỚI để né
+ *   fullBlock: không thể né bằng bất kỳ cách nào (chỉ đổi làn)
+ */
+const OBS_BUILDERS = [
+    // ── NEW: Toa Tàu Di Chuyển (Moving Train) ──
+    {
+        lbl: 'Tàu Di Chuyển',
+        slideBottom: 0,
+        jumpTop: 99, 
+        fullBlock: false,
+        isPlatform: true,
+        roofHeight: 2.3, // Can jump onto the roof
+        length: 12.0,
+        moveSpeed: 25, // Moves towards player
+        build() {
+            const g = new THREE.Group();
+            
+            // Thân chính (Train Body) 
+            // Màu xanh dương đẹp mắt
+            const bodyMat = new THREE.MeshLambertMaterial({ color: 0x1e88e5 });
+            const body = new THREE.Mesh(new THREE.BoxGeometry(2.1, 2.4, 12), bodyMat);
+            body.position.y = 1.2; g.add(body);
+            
+            // Kính chắn gió trước
+            const glassMat = new THREE.MeshLambertMaterial({ color: 0x111122, emissive: 0x050510 });
+            const glass = new THREE.Mesh(new THREE.PlaneGeometry(1.9, 1.2), glassMat);
+            glass.position.set(0, 1.4, -6.01); 
+            glass.rotation.y = Math.PI; 
+            g.add(glass);
+            
+            // Kính bên sườn
+            [-1.06, 1.06].forEach(x => {
+                for(let i=0; i<4; i++) {
+                    const win = new THREE.Mesh(new THREE.PlaneGeometry(1.6, 0.8), glassMat);
+                    win.position.set(x, 1.4, -3.5 + i*2.3);
+                    win.rotation.y = x > 0 ? Math.PI/2 : -Math.PI/2;
+                    g.add(win);
+                }
+            });
+            
+            // Đèn pha trước
+            const headlightMat = new THREE.MeshLambertMaterial({ color: 0xffffff, emissive: 0xfff0b0, emissiveIntensity: 1.5 });
+            [-0.7, 0.7].forEach(x => {
+                const hl = new THREE.Mesh(new THREE.CircleGeometry(0.2, 16), headlightMat);
+                hl.position.set(x, 0.6, -6.02);
+                hl.rotation.y = Math.PI;
+                g.add(hl);
+            });
+            
+            // Bánh tàu
+            const wheelMat = new THREE.MeshLambertMaterial({ color: 0x222222 });
+            [-0.8, 0.8].forEach(x => {
+                [-4, -2, 2, 4].forEach(z => {
+                    const w = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.3, 0.2, 12), wheelMat);
+                    w.rotation.z = Math.PI/2;
+                    w.position.set(x, 0.3, z);
+                    g.add(w);
+                });
+            });
+
+            return g;
+        }
+    },
+
+    // ── NEW: Toa Tàu Đứng Yên (Static Train) ──
+    {
+        lbl: 'Tàu Đứng Yên',
+        slideBottom: 0,
+        jumpTop: 99, 
+        fullBlock: false,
+        isPlatform: true,
+        roofHeight: 2.3, // Can jump onto the roof
+        length: 12.0,
+        moveSpeed: 0,
+        build() {
+            const g = new THREE.Group();
+            
+            // Thân chính (Train Body) 
+            const bodyMat = new THREE.MeshLambertMaterial({ color: 0xe53935 }); // Đỏ
+            const body = new THREE.Mesh(new THREE.BoxGeometry(2.1, 2.4, 12), bodyMat);
+            body.position.y = 1.2; g.add(body);
+            
+            // Kính chắn gió trước
+            const glassMat = new THREE.MeshLambertMaterial({ color: 0x111122 });
+            const glass = new THREE.Mesh(new THREE.PlaneGeometry(1.9, 1.2), glassMat);
+            glass.position.set(0, 1.4, -6.01); 
+            glass.rotation.y = Math.PI; 
+            g.add(glass);
+            
+            // Kính bên sườn
+            [-1.06, 1.06].forEach(x => {
+                for(let i=0; i<4; i++) {
+                    const win = new THREE.Mesh(new THREE.PlaneGeometry(1.6, 0.8), glassMat);
+                    win.position.set(x, 1.4, -3.5 + i*2.3);
+                    win.rotation.y = x > 0 ? Math.PI/2 : -Math.PI/2;
+                    g.add(win);
+                }
+            });
+            
+            return g;
+        }
+    },
+
+    // ── 0: Rào cản tiêu chuẩn (Standard Barrier) ── nhảy qua được
+    {
+        lbl: 'Rào Cản',
+        slideBottom: 0,     // Từ mặt đất → phải nhảy, không slide qua
+        jumpTop: 1.4,    // Nhảy qua nếu player.y > 1.4
+        fullBlock: false,
+        build() {
+            const g = new THREE.Group();
+            // Thân chính
+            const body = new THREE.Mesh(new THREE.BoxGeometry(2.0, 1.2, 0.4), MAT.red);
+            body.position.y = 0.6; g.add(body);
+            // Sọc trắng phản quang
+            const stripe = new THREE.Mesh(new THREE.BoxGeometry(2.0, 0.15, 0.42), MAT.white);
+            stripe.position.y = 0.7; g.add(stripe);
+            // Hai chân đỡ
+            [-0.7, 0.7].forEach(x => {
+                const leg = new THREE.Mesh(new THREE.BoxGeometry(0.25, 0.35, 0.3), MAT.dark);
+                leg.position.set(x, 0.17, 0); g.add(leg);
+            });
+            return g;
+        }
+    },
+
+    // ── 1: Cổng Vòm (Arch Gate) ── chỉ slide dưới, không nhảy qua
+    {
+        lbl: 'Cổng Vòm',
+        slideBottom: 1.1,   // Thanh ngang ở y=2.1, tức bottom=1.1 → slide (top=0.95) qua được!
+        jumpTop: 99,     // Không thể nhảy qua (quá cao)
+        fullBlock: false,   // slide qua được
+        build() {
+            const g = new THREE.Group();
+            // Cột trái
+            const pL = new THREE.Mesh(new THREE.BoxGeometry(0.35, 2.4, 0.35), MAT.metal);
+            pL.position.set(-1.6, 1.2, 0); g.add(pL);
+            // Cột phải
+            const pR = pL.clone();
+            pR.position.set(1.6, 1.2, 0); g.add(pR);
+            // Thanh ngang (ở y=2.1 → bottom=1.95 → slide dễ)
+            const bar = new THREE.Mesh(new THREE.BoxGeometry(3.55, 0.3, 0.35), MAT.red);
+            bar.position.y = 2.25; g.add(bar);
+            // Đèn cảnh báo trên thanh
+            [-1.4, 0, 1.4].forEach(x => {
+                const lamp = new THREE.Mesh(new THREE.BoxGeometry(0.25, 0.25, 0.1), MAT.yellow);
+                lamp.position.set(x, 2.42, 0.2); g.add(lamp);
+            });
+            return g;
+        }
+    },
+
+    // ── 2: Thanh Ngang Lơ Lửng (Floating Bar) ── BẮT BUỘC phải slide
+    {
+        lbl: 'Thanh Lơ Lửng',
+        slideBottom: 1.05,  // Đáy ở y=1.05 → player slide (top=0.95) lọt qua!
+        jumpTop: 99,
+        fullBlock: false,
+        build() {
+            const g = new THREE.Group();
+            // Thanh chính
+            const beam = new THREE.Mesh(new THREE.BoxGeometry(3.0, 0.32, 0.55), MAT.orange);
+            beam.position.y = 1.5; g.add(beam);
+            // Dây treo từ trên (trang trí)
+            [-1.2, 0, 1.2].forEach(x => {
+                const rope = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.8, 0.06), MAT.dark);
+                rope.position.set(x, 2.1, 0); g.add(rope);
+            });
+            // Mũi nhọn cảnh báo phía dưới
+            [[-0.9, 1.16], [0, 1.16], [0.9, 1.16]].forEach(([x, y]) => {
+                const spike = new THREE.Mesh(new THREE.ConeGeometry(0.1, 0.22, 4), MAT.red);
+                spike.position.set(x, y, 0);
+                spike.rotation.z = Math.PI; g.add(spike);
+            });
+            return g;
+        }
+    },
+
+    // ── 3: Xe Cảnh Sát Lật Ngang (Police Blockade) ── nhảy qua
+    {
+        lbl: 'Xe Chặn Đường',
+        slideBottom: 0,
+        jumpTop: 1.0,
+        fullBlock: false,
+        build() {
+            const g = new THREE.Group();
+            // Thân xe
+            const chassis = new THREE.Mesh(new THREE.BoxGeometry(2.2, 0.5, 1.0), MAT.blue);
+            chassis.position.y = 0.25; g.add(chassis);
+            // Cabin
+            const cabin = new THREE.Mesh(new THREE.BoxGeometry(1.4, 0.55, 0.95), MAT.blue);
+            cabin.position.y = 0.78; g.add(cabin);
+            // Đèn nóc
+            const light = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.15, 0.2), MAT.red);
+            light.position.y = 1.1; g.add(light);
+            // Bánh xe
+            [[-0.7, -0.4], [0.7, -0.4], [-0.7, 0.4], [0.7, 0.4]].forEach(([x, z]) => {
+                const wheel = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.22, 0.18, 8), MAT.dark);
+                wheel.rotation.z = Math.PI / 2;
+                wheel.position.set(x, 0.22, z); g.add(wheel);
+            });
+            // Biển Stop
+            const sign = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.35, 0.05), MAT.white);
+            sign.position.set(0, 1.2, 0.53); g.add(sign);
+            return g;
+        }
+    },
+
+    // ── 4: Đống Thùng Cao (Crate Stack) ── phải nhảy
+    {
+        lbl: 'Thùng Hàng',
+        slideBottom: 0,
+        jumpTop: 1.8,
+        fullBlock: false,
+        build() {
+            const g = new THREE.Group();
+            // Thùng dưới (lớn)
+            const b1 = new THREE.Mesh(new THREE.BoxGeometry(1.8, 1.0, 1.0), MAT.purple);
+            b1.position.y = 0.5; g.add(b1);
+            // Thùng giữa
+            const b2 = new THREE.Mesh(new THREE.BoxGeometry(1.5, 0.9, 0.95), MAT.darkRed);
+            b2.position.y = 1.45; g.add(b2);
+            // Thùng nhỏ trên cùng
+            const b3 = new THREE.Mesh(new THREE.BoxGeometry(1.1, 0.7, 0.8), MAT.purple);
+            b3.position.y = 2.25; g.add(b3);
+            // Nẹp kim loại
+            [-0.5, 0.5].forEach(y => {
+                const strap = new THREE.Mesh(new THREE.BoxGeometry(1.85, 0.08, 1.02), MAT.metal);
+                strap.position.set(0, y + 0.35, 0); g.add(strap);
+            });
+            return g;
+        }
+    },
+
+    // ── 5: Hố Nước (Ground Burst) ── phải nhảy hoặc lách sang làn khác
+    {
+        lbl: 'Vật Cản Thấp',
+        slideBottom: 0,
+        jumpTop: 0.7,    // Nhảy thấp là qua
+        fullBlock: false,
+        build() {
+            const g = new THREE.Group();
+            // Khối đá vỡ
+            [[-0.5, 0.3, 0], [0, 0.4, 0.2], [0.55, 0.25, -0.2], [-0.3, 0.2, -0.3]].forEach(([x, h, z]) => {
+                const rock = new THREE.Mesh(
+                    new THREE.BoxGeometry(0.55 + Math.random() * 0.4, h * 1.2, 0.55),
+                    MAT.grey
+                );
+                rock.position.set(x, h / 2, z);
+                rock.rotation.y = x * 0.8;
+                g.add(rock);
+            });
+            // Mũi nhọn lên
+            const spike = new THREE.Mesh(new THREE.ConeGeometry(0.18, 0.55, 4), MAT.darkRed);
+            spike.position.set(0, 0.55, 0); g.add(spike);
+            return g;
+        }
+    },
+
+    // ── 6: Laser Ngang (Laser Beam) ── kết hợp cả nhảy lẫn slide
+    //     Laser dưới thấp (phải nhảy qua) + Laser trên (phải slide nếu không kịp nhảy)
+    {
+        lbl: 'Tia Laser',
+        slideBottom: 1.0,  // Cổng trên: có thể slide qua phần trên
+        jumpTop: 0.65,  // Tia dưới: nhảy qua
+        fullBlock: false,
+        build() {
+            const g = new THREE.Group();
+            // Generator trái & phải
+            [-1.5, 1.5].forEach(x => {
+                const gen = new THREE.Mesh(new THREE.BoxGeometry(0.4, 2.8, 0.4), MAT.dark);
+                gen.position.set(x, 1.4, 0); g.add(gen);
+                // Đèn trên generator
+                const glow = new THREE.Mesh(new THREE.SphereGeometry(0.2, 6, 5), MAT.green);
+                glow.position.set(x, 2.82, 0); g.add(glow);
+            });
+            // Tia laser dưới (ở y=0.45) — phải nhảy qua
+            const laserLow = new THREE.Mesh(new THREE.BoxGeometry(2.6, 0.1, 0.1), MAT.green);
+            laserLow.position.y = 0.45; g.add(laserLow);
+            // Tia laser trên (ở y=1.55) — đứng phải cúi/slide qua
+            const laserHigh = new THREE.Mesh(new THREE.BoxGeometry(2.6, 0.1, 0.1), MAT.red);
+            laserHigh.position.y = 1.55; g.add(laserHigh);
+            return g;
+        }
+    },
+
+    // ── 7: Barrel Lăn Khổng Lồ (Giant Rolling Barrel)
+    {
+        lbl: 'Thùng Phi',
+        slideBottom: 0,
+        jumpTop: 1.1,
+        fullBlock: false,
+        build() {
+            const g = new THREE.Group();
+            const body = new THREE.Mesh(new THREE.CylinderGeometry(1.0, 1.0, 1.8, 10), MAT.orange);
+            body.rotation.x = Math.PI / 2;  // Lăn theo trục Z
+            body.position.y = 1.0; g.add(body);
+            // Đai thùng
+            [-0.5, 0, 0.5].forEach(z => {
+                const ring = new THREE.Mesh(new THREE.TorusGeometry(1.0, 0.09, 6, 12), MAT.dark);
+                ring.rotation.x = Math.PI / 2;
+                ring.position.set(0, 1.0, z); g.add(ring);
+            });
+            g.userData.spin = false; 
+            return g;
+        }
+    },
+
+    // ── 8: Tường Gạch Đặc (Solid Brick Wall) ── Chặn đặc 1 làn
+    {
+        lbl: 'Tường Gạch',
+        slideBottom: 0,
+        jumpTop: 99,
+        fullBlock: true,
+        build() {
+            const g = new THREE.Group();
+            const wall = new THREE.Mesh(new THREE.BoxGeometry(2.2, 3.5, 0.8), MAT.darkRed);
+            wall.position.y = 1.75; g.add(wall);
+            // Cột viền
+            [-1.15, 1.15].forEach(x => {
+                const col = new THREE.Mesh(new THREE.BoxGeometry(0.3, 3.8, 1.0), MAT.metal);
+                col.position.set(x, 1.9, 0); g.add(col);
+                // Đèn nháy trên đỉnh
+                const light = new THREE.Mesh(new THREE.SphereGeometry(0.2, 8, 8), MAT.yellow);
+                light.position.set(x, 3.9, 0); g.add(light);
+            });
+            // Biển cảnh báo
+            const sign = new THREE.Mesh(new THREE.PlaneGeometry(1.2, 1.2), MAT.yellow);
+            sign.position.set(0, 2.0, 0.41); g.add(sign);
+            const danger = new THREE.Mesh(new THREE.PlaneGeometry(0.8, 0.8), MAT.red);
+            danger.position.set(0, 2.0, 0.42); g.add(danger);
+            return g;
+        }
+    },
+    // ── 9: Drone Tuần Tra (Patrol Drone) ── Phải slide (overhead block)
+    {
+        lbl: 'Drone',
+        slideBottom: 1.2,
+        jumpTop: 99,
+        fullBlock: false,
+        build() {
+            const g = new THREE.Group();
+            const body = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.4, 1.2), MAT.dark);
+            body.position.y = 2.4; g.add(body);
+            // Cánh quạt
+            [[-0.6, -0.6], [0.6, -0.6], [-0.6, 0.6], [0.6, 0.6]].forEach(([x, z]) => {
+                const prop = new THREE.Mesh(new THREE.BoxGeometry(0.8, 0.05, 0.1), MAT.metal);
+                prop.position.set(x, 2.6, z);
+                prop.name = 'prop';
+                g.add(prop);
+            });
+            // Đèn quét laser
+            const light = new THREE.Mesh(new THREE.ConeGeometry(0.5, 2.4, 8), new THREE.MeshBasicMaterial({ color: 0xff0000, transparent: true, opacity: 0.2 }));
+            light.position.y = 1.2; light.rotation.x = Math.PI; g.add(light);
+            return g;
+        }
+    },
+    // ── 10: Tường Chặn Ba (Triple Grid) ── Có khe hở ở giữa (nhảy) hoặc 2 bên (slide)
+    {
+        lbl: 'Lưới Điện',
+        slideBottom: 0,
+        jumpTop: 1.5,
+        fullBlock: false,
+        build() {
+            const g = new THREE.Group();
+            const frame = new THREE.Mesh(new THREE.BoxGeometry(2.2, 2.5, 0.2), MAT.metal);
+            frame.position.y = 1.25; g.add(frame);
+            const panel = new THREE.Mesh(new THREE.BoxGeometry(2.0, 2.0, 0.1), new THREE.MeshLambertMaterial({ color: 0x00ffff, emissive: 0x00ffff, emissiveIntensity: 0.5, transparent: true, opacity: 0.4 }));
+            panel.position.y = 1.25; g.add(panel);
+            return g;
+        }
+    },
+    // ── 11: Xe Công Trình (Construction Truck) ── Nhảy qua cabin hoặc lách
+    {
+        lbl: 'Xe Tải',
+        slideBottom: 0,
+        jumpTop: 2.2,
+        fullBlock: false,
+        build() {
+            const g = new THREE.Group();
+            const cab = new THREE.Mesh(new THREE.BoxGeometry(1.8, 1.5, 2.0), MAT.yellow);
+            cab.position.y = 0.75; g.add(cab);
+            const bed = new THREE.Mesh(new THREE.BoxGeometry(2.0, 1.2, 3.5), MAT.grey);
+            bed.position.set(0, 0.6, -2.8); g.add(bed);
+            return g;
+        }
+    },
+    // ── 12: Robot Cản Đường (Blocker Bot) ── Thủ thế, chiếm diện tích rộng
+    {
+        lbl: 'Robot Chặn',
+        slideBottom: 0,
+        jumpTop: 99,
+        fullBlock: true,
+        build() {
+            const g = new THREE.Group();
+            const torso = new THREE.Mesh(new THREE.BoxGeometry(1.5, 1.8, 1.0), MAT.metal);
+            torso.position.y = 1.2; g.add(torso);
+            const head = new THREE.Mesh(new THREE.BoxGeometry(0.8, 0.6, 0.8), MAT.red);
+            head.position.y = 2.4; g.add(head);
+            const arms = new THREE.Mesh(new THREE.BoxGeometry(3.0, 0.4, 0.4), MAT.metal);
+            arms.position.y = 1.8; g.add(arms);
+            return g;
+        }
+    }
+];
+
+// ═══════════════════════════════════════════
+// 4. INIT THREE.JS SCENE
+// ═══════════════════════════════════════════
+function initThree() {
+    scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x111520);
+    // Exponential fog - nhẹ hơn linear, nhìn đẹp hơn
+    scene.fog = new THREE.FogExp2(0x111520, 0.015);
+
+    camera = new THREE.PerspectiveCamera(62, innerWidth / innerHeight, 0.1, 130);
+    camera.position.set(0, 5, 10);
+    camera.lookAt(0, 2, -5);
+
+    // Renderer: antialiase OFF (perf), pixelRatio capped at 2
+    renderer = new THREE.WebGLRenderer({
+        antialias: false,
+        powerPreference: 'high-performance',
+    });
+    renderer.setPixelRatio(Math.min(devicePixelRatio, 1.5));
+    renderer.setSize(innerWidth, innerHeight);
+    renderer.shadowMap.enabled = false;
+    renderer.sortObjects = false;
+    renderer.autoClearColor = true;
+
+    const root = document.getElementById('game-root');
+    root.insertBefore(renderer.domElement, root.firstChild);
+    renderer.domElement.style.cssText = 'position:absolute;inset:0;z-index:0;width:100% !important;height:100% !important;';
+
+    // Lighting
+    scene.add(new THREE.AmbientLight(0xffffff, 0.65));
+    const sun = new THREE.DirectionalLight(0xfff5e0, 0.9);
+    sun.position.set(8, 20, 5);
+    scene.add(sun);
+    // Cool rim light from behind
+    const rim = new THREE.DirectionalLight(0x446aff, 0.35);
+    rim.position.set(-6, 4, -15);
+    scene.add(rim);
+
+    setupInput();
+
+    // ── Stars (Particles) ──
+    const starGeo = new THREE.BufferGeometry();
+    const starPos = [];
+    for (let i = 0; i < 2000; i++) {
+        starPos.push((Math.random() - 0.5) * 600, (Math.random() - 0.5) * 400, (Math.random() - 0.5) * 800);
+    }
+    starGeo.setAttribute('position', new THREE.Float32BufferAttribute(starPos, 3));
+    const starMat = new THREE.PointsMaterial({ color: 0xffffff, size: 0.6, transparent: true, opacity: 0.5 });
+    G.stars = new THREE.Points(starGeo, starMat);
+    scene.add(G.stars);
+
+    window.addEventListener('resize', onResize);
+    onResize();
+
+    // Start async world building
+    buildWorldAsync().then(() => {
+        G.worldReady = true;
+    }).catch(e => {
+        console.error("Lỗi khởi tạo màn chơi:", e);
+        G.worldReady = true; // ép chạy qua loading nếu có lỗi môi trường nhỏ
+    });
+
+    requestAnimationFrame(gameLoop);
+}
+
+async function buildWorldAsync() {
+    buildPlayer();
+    buildTrackPool();
+    await buildEnvironmentAsync();
+    await buildObjectPoolsAsync();
+}
+
+// ═══════════════════════════════════════════
+// 5. PLAYER - Multi-part procedural character
+// ═══════════════════════════════════════════
+function buildPlayer() {
+    playerGroup = new THREE.Group();
+    playerMat = new THREE.MeshLambertMaterial({ color: 0x3498db });
+    playerAccentMat = new THREE.MeshLambertMaterial({ color: 0xf0a500 });
+    const darkMat = new THREE.MeshLambertMaterial({ color: 0x1a252f });
+    const skinMat = new THREE.MeshLambertMaterial({ color: 0xf5cba7 });
+
+    // IMPORTANT: Hướng nhân vật về phía -Z (phướng chạy)
+    // Mặt trước (visor, mắt) ở mặt Z âm sẽ hướng về phía trước
+    // playerGroup.rotation.y = Math.PI → quay 180° để mặt đối camera nhìn vào lưng
+
+    // Torso
+    const torso = new THREE.Mesh(new THREE.BoxGeometry(0.85, 1.05, 0.5), playerMat);
+    torso.position.y = 0.65; torso.name = 'torso'; playerGroup.add(torso);
+
+    // Mạng lưới áo
+    const strip = new THREE.Mesh(new THREE.BoxGeometry(0.3, 1.0, 0.52), playerAccentMat);
+    strip.position.set(0, 0.65, 0); playerGroup.add(strip);
+
+    // Đầu
+    const head = new THREE.Mesh(new THREE.BoxGeometry(0.65, 0.6, 0.58), skinMat);
+    head.position.y = 1.48; head.name = 'head'; playerGroup.add(head);
+
+    // Mũ bảo hiểm
+    const cap = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.28, 0.62), playerAccentMat);
+    cap.position.set(0, 1.76, 0); playerGroup.add(cap);
+    // Lưỡi mũ nhô ra phía trước → -Z (vì group sẽ quay)
+    const brim = new THREE.Mesh(new THREE.BoxGeometry(0.82, 0.07, 0.38), playerAccentMat);
+    brim.position.set(0, 1.63, -0.2); playerGroup.add(brim);
+
+    // Mắt (nhìn về -Z)
+    const eyeMat = new THREE.MeshLambertMaterial({ color: 0x1a1a2e });
+    const eyeWhiteMat = new THREE.MeshLambertMaterial({ color: 0xffffff });
+    [-0.16, 0.16].forEach(ex => {
+        const eyeWhite = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.15, 0.06), eyeWhiteMat);
+        eyeWhite.position.set(ex, 1.5, -0.31); playerGroup.add(eyeWhite);
+        const pupil = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.1, 0.06), eyeMat);
+        pupil.position.set(ex, 1.5, -0.34); playerGroup.add(pupil);
+    });
+
+    // Cánh tay
+    const armGeo = new THREE.BoxGeometry(0.28, 0.85, 0.3);
+    [-0.58, 0.58].forEach((ax, i) => {
+        const arm = new THREE.Mesh(armGeo, playerMat);
+        arm.position.set(ax, 0.6, 0);
+        arm.name = `arm${i}`; playerGroup.add(arm);
+    });
+
+    // Chân
+    const legGeo = new THREE.BoxGeometry(0.36, 0.85, 0.36);
+    [[-0.22, 'legL'], [0.22, 'legR']].forEach(([lx, nm]) => {
+        const leg = new THREE.Mesh(legGeo, darkMat);
+        leg.position.set(lx, -0.25, 0);
+        leg.name = nm; playerGroup.add(leg);
+    });
+
+    // Giày
+    const shoeGeo = new THREE.BoxGeometry(0.38, 0.22, 0.52);
+    [[-0.22, 'shoeL'], [0.22, 'shoeR']].forEach(([sx, nm]) => {
+        const shoe = new THREE.Mesh(shoeGeo, playerAccentMat);
+        // Giày nhô ra phía trước (-Z)
+        shoe.position.set(sx, -0.73, -0.07);
+        shoe.name = nm; playerGroup.add(shoe);
+    });
+
+    // Ba lô (ở phía sau: +Z)
+    const pack = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.65, 0.22), playerAccentMat);
+    pack.position.set(0, 0.65, 0.36); playerGroup.add(pack);
+    // Dây đeo ba lô
+    const strapMat = new THREE.MeshLambertMaterial({ color: 0x2c3e50 });
+    [-0.2, 0.2].forEach(sx => {
+        const strap = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.7, 0.05), strapMat);
+        strap.position.set(sx, 0.7, 0.28); playerGroup.add(strap);
+    });
+
+    playerGroup.position.set(C.LANES[1], C.PLAYER_Y, 0);
+
+    // Cache references for performance
+    G.pc = {
+        legL: playerGroup.children.find(c => c.name === 'legL'),
+        legR: playerGroup.children.find(c => c.name === 'legR'),
+        arm0: playerGroup.children.find(c => c.name === 'arm0'),
+        arm1: playerGroup.children.find(c => c.name === 'arm1'),
+        body: torso, head: head
+    };
+
+    scene.add(playerGroup);
+}
+
+// Get named child of playerGroup
+function pc(name) { return playerGroup.children.find(c => c.name === name); }
+
+// ═══════════════════════════════════════════
+// 6. TRACK POOL
+// ═══════════════════════════════════════════
+function buildTrackPool() {
+    const lineGeo = new THREE.PlaneGeometry(0.1, C.SEG_LEN);
+    const borderGeo = new THREE.PlaneGeometry(0.2, C.SEG_LEN);
+    const roadGeo = new THREE.PlaneGeometry(C.TRACK_W, C.SEG_LEN);
+
+    for (let i = 0; i < C.SEG_COUNT; i++) {
+        const seg = new THREE.Group();
+
+        const road = new THREE.Mesh(roadGeo, MAT.track);
+        road.rotation.x = -Math.PI / 2; seg.add(road);
+
+        // Lane dividers
+        const divX = C.TRACK_W / 6; // 1.2
+        [-divX, divX].forEach(lx => {
+            const line = new THREE.Mesh(lineGeo, MAT.lane);
+            line.rotation.x = -Math.PI / 2;
+            line.position.set(lx, 0.005, 0); seg.add(line);
+        });
+
+        // Borders (gold strips)
+        [-C.TRACK_W / 2, C.TRACK_W / 2].forEach(bx => {
+            const brd = new THREE.Mesh(borderGeo, MAT.border);
+            brd.rotation.x = -Math.PI / 2;
+            brd.position.set(bx, 0.008, 0); seg.add(brd);
+        });
+
+        seg.position.z = -i * C.SEG_LEN + C.SEG_LEN / 2;
+        scene.add(seg);
+        trackSegs.push(seg);
+    }
+}
+
+// ═══════════════════════════════════════════
+// 7. ENVIRONMENT - Optimized with InstancedMesh & Async
+// ═══════════════════════════════════════════
+async function buildEnvironmentAsync() {
+    envGroup = new THREE.Group();
+
+    // Sidewalks
+    const swGeo = new THREE.PlaneGeometry(4.5, 400);
+    [-6.5, 6.5].forEach(sx => {
+        const sw = new THREE.Mesh(swGeo, MAT.sidewalk);
+        sw.rotation.x = -Math.PI / 2;
+        sw.position.set(sx, 0.002, -180);
+        envGroup.add(sw);
+    });
+
+    // City buildings - Build in chunks to avoid freeze
+    const rng = mulberry32(42);
+    const windowGeo = new THREE.PlaneGeometry(0.4, 0.4);
+
+    // Calculate total windows first for InstancedMesh
+    let totalWinCount = 0;
+    const buildings = [];
+    for (let i = 0; i < 24; i++) {
+        for (let side of [-1, 1]) {
+            const w = 2.5 + rng() * 3;
+            const h = 4 + rng() * 18;
+            const d = 2.5 + rng() * 3;
+            const wRows = Math.floor(h / 1.5);
+            const wCols = Math.floor(w / 1.1);
+            buildings.push({ i, side, w, h, d, wRows, wCols });
+            for (let wr = 0; wr < wRows; wr++) {
+                for (let wc = 0; wc < wCols; wc++) {
+                    if (rng() < 0.45) totalWinCount++;
+                }
+            }
+        }
+    }
+
+    const instWins = new THREE.InstancedMesh(windowGeo, MAT.window, totalWinCount);
+    let winIdx = 0;
+    const dummy = new THREE.Object3D();
+
+    // Reset RNG for second pass
+    const rng2 = mulberry32(42);
+    for (let b of buildings) {
+        const mat = MAT.building[Math.floor(rng2() * MAT.building.length)];
+        const bGeo = new THREE.BoxGeometry(b.w, b.h, b.d);
+        const bld = new THREE.Mesh(bGeo, mat);
+        bld.position.set(
+            b.side * (6 + b.w / 2 + rng2() * 3),
+            b.h / 2,
+            -20 - b.i * 16 + rng2() * 6
+        );
+        envGroup.add(bld);
+
+        // Windows
+        for (let wr = 0; wr < b.wRows; wr++) {
+            for (let wc = 0; wc < b.wCols; wc++) {
+                if (rng2() < 0.45) {
+                    dummy.position.set(
+                        bld.position.x + (wc - b.wCols / 2) * 1.1,
+                        1.5 + wr * 1.5,
+                        bld.position.z + (b.side > 0 ? -b.d / 2 - 0.02 : b.d / 2 + 0.02)
+                    );
+                    dummy.rotation.y = b.side > 0 ? 0 : Math.PI;
+                    dummy.updateMatrix();
+                    instWins.setMatrixAt(winIdx++, dummy.matrix);
+                }
+            }
+        }
+
+        // Roadside Props (Poles/Boxes)
+        if (rng2() < 0.35) {
+            const prop = rng2() < 0.5 
+                ? new THREE.Mesh(GEO.cyl_pole, MAT.metal)
+                : new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.6, 0.6), MAT.grey);
+            prop.position.set(b.side * (4.2 + rng2() * 0.5), prop.geometry.parameters.height / 2 || 0.3, bld.position.z + rng2() * 4);
+            envGroup.add(prop);
+        }
+
+        // Yield every 4 buildings
+        if (b.i % 4 === 0) await new Promise(r => requestAnimationFrame(r));
+    }
+    envGroup.add(instWins);
+
+    // Street lamps
+    const poleMat = new THREE.MeshLambertMaterial({ color: 0x5a6470 });
+    const lampMat = new THREE.MeshLambertMaterial({ color: 0xfffae0, emissive: 0xfff0a0, emissiveIntensity: 0.8 });
+    for (let i = 0; i < 16; i++) {
+        for (let side of [-5.2, 5.2]) {
+            const g = new THREE.Group();
+            const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.09, 5.5, 6), poleMat);
+            pole.position.y = 2.75; g.add(pole);
+            const arm = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 1.4, 4), poleMat);
+            arm.rotation.z = Math.PI / 2;
+            arm.position.set(side < 0 ? 0.7 : -0.7, 5.6, 0); g.add(arm);
+            const bulb = new THREE.Mesh(new THREE.BoxGeometry(0.35, 0.28, 0.35), lampMat);
+            bulb.position.set(side < 0 ? 1.4 : -1.4, 5.45, 0); g.add(bulb);
+            g.position.set(side, 0, -8 - i * 14);
+            envGroup.add(g);
+        }
+    }
+
+    scene.add(envGroup);
+}
+
+// Seeded PRNG (for consistent env generation)
+function mulberry32(seed) {
+    return function () {
+        seed |= 0; seed = seed + 0x6D2B79F5 | 0;
+        let z = Math.imul(seed ^ seed >>> 15, 1 | seed);
+        z = z + Math.imul(z ^ z >>> 7, 61 | z) ^ z;
+        return ((z ^ z >>> 14) >>> 0) / 4294967296;
+    };
+}
+
+// ═══════════════════════════════════════════
+// 8. OBJECT POOLS - Async
+// ═══════════════════════════════════════════
+async function buildObjectPoolsAsync() {
+    for (let bi = 0; bi < OBS_BUILDERS.length; bi++) {
+        // Increase copy count to 6 to ensure variety isn't throttled
+        for (let copy = 0; copy < 6; copy++) {
+            const g = OBS_BUILDERS[bi].build();
+            g.userData = {
+                active: false,
+                builderIdx: bi,
+                typeData: OBS_BUILDERS[bi],
+            };
+            g.visible = false;
+            scene.add(g);
+            obstaclePool.push(g);
+        }
+        if (bi % 3 === 0) await new Promise(r => requestAnimationFrame(r));
+    }
+
+    // Coin pool
+    for (let i = 0; i < 20; i++) {
+        const c = new THREE.Mesh(GEO.coin, MAT.coin);
+        c.userData = { active: false };
+        c.visible = false;
+        scene.add(c);
+        coinPool.push(c);
+    }
+
+    // Particle pool
+    for (let i = 0; i < C.PARTICLE_POOL; i++) {
+        const p = new THREE.Mesh(GEO.particle, MAT.particle.clone());
+        p.userData = { active: false, vel: new THREE.Vector3(), life: 0, maxLife: 0 };
+        p.visible = false;
+        scene.add(p);
+        particlePool.push(p);
+    }
+}
+
+function getPooled(pool) {
+    return pool.find(m => !m.userData.active) || null;
+}
+
+// ═══════════════════════════════════════════
+// 9. SPAWN LOGIC
+// ═══════════════════════════════════════════
+function spawnObstacle() {
+    const isDual = Math.random() < 0.35; // 35% chance cho 2 chướng ngại
+    
+    function spawnSingle(lane) {
+        const bIdx = Math.floor(Math.random() * OBS_BUILDERS.length);
+        const mesh = obstaclePool.find(m => !m.userData.active && m.userData.builderIdx === bIdx);
+        if (!mesh) return;
+
+        mesh.userData.active = true;
+        mesh.userData.laneIdx = lane;
+        mesh.position.set(C.LANES[lane], 0, C.SPAWN_Z);
+        mesh.rotation.y = 0;
+        mesh.visible = true;
+        activeObstacles.push(mesh);
+    }
+
+    const lane1 = Math.floor(Math.random() * 3);
+    spawnSingle(lane1);
+
+    if (isDual) {
+        let lane2 = Math.floor(Math.random() * 3);
+        while (lane2 === lane1) lane2 = Math.floor(Math.random() * 3);
+        spawnSingle(lane2);
+    }
+}
+
+function spawnCoin() {
+    // Spawn a row of 3 coins in same lane
+    const laneIdx = Math.floor(Math.random() * 3);
+    const zStart = C.COIN_SPAWN_Z;
+    for (let ci = 0; ci < 3; ci++) {
+        const c = getPooled(coinPool);
+        if (!c) return;
+        c.userData.active = true;
+        c.position.set(C.LANES[laneIdx], 1.4, zStart - ci * 2);
+        c.rotation.x = 0;
+        c.visible = true;
+        activeCoins.push(c);
+    }
+}
+
+function spawnParticles(pos, count = 8, color = 0xffd28f) {
+    for (let i = 0; i < count; i++) {
+        const p = getPooled(particlePool);
+        if (!p) return;
+        p.userData.active = true;
+        p.userData.life = 0;
+        p.userData.maxLife = 0.3 + Math.random() * 0.3;
+        p.userData.vel.set(
+            (Math.random() - 0.5) * 4,
+            Math.random() * 3 + 1,
+            (Math.random() - 0.5) * 2
+        );
+        p.material.color.setHex(color);
+        p.material.opacity = 1;
+        p.position.copy(pos);
+        p.visible = true;
+        activeParticles.push(p);
+    }
+}
+
+// ─── Sky System ────────────────────────────────────────────────
+function updateSky(dt) {
+    if (!G.running || G.paused || G.quizActive) return;
+
+    G.skyTime += dt;
+    const modeA = C.SKY_MODES[G.skyIdx];
+    const modeB = C.SKY_MODES[(G.skyIdx + 1) % C.SKY_MODES.length];
+    const t = Math.min(1, G.skyTime / C.SKY_CYCLE_DUR);
+
+    // Lerp colors (Optimized: avoid new Color per frame)
+    _tmpColA.set(modeA.bg);
+    _tmpColB.set(modeB.bg);
+    _tmpColA.lerp(_tmpColB, t);
+    
+    scene.background = _tmpColA;
+    if (scene.fog) scene.fog.color = _tmpColA;
+
+    // Lerp lights
+    const ambient = modeA.ambient + (modeB.ambient - modeA.ambient) * t;
+    const sunIntensity = modeA.sun + (modeB.sun - modeA.sun) * t;
+
+    scene.children.forEach(c => {
+        if (c instanceof THREE.AmbientLight) c.intensity = ambient;
+        if (c instanceof THREE.DirectionalLight) c.intensity = sunIntensity;
+    });
+
+    if (t >= 1) {
+        G.skyTime = 0;
+        G.skyIdx = (G.skyIdx + 1) % C.SKY_MODES.length;
+    }
+
+    // Update Stars visibility
+    if (G.stars) {
+        const isDark = (G.skyIdx === 0 || G.skyIdx === 4); // Midnight/Cyber
+        const targetOp = isDark ? 0.6 : 0.0;
+        G.stars.material.opacity += (targetOp - G.stars.material.opacity) * 0.05;
+        G.stars.position.z = (camera.position.z % 100); 
+    }
+}
+
+// ═══════════════════════════════════════════
+// 10. GAME LOOP (Physics + Animation + Render)
+// ═══════════════════════════════════════════
+function gameLoop(nowMs) {
+    requestAnimationFrame(gameLoop);
+
+    const now = nowMs / 1000;
+    let dt = now - G.lastTime;
+    G.lastTime = now;
+    if (dt > C.DT_MAX) dt = C.DT_MAX;
+    if (dt <= 0) { renderer.render(scene, camera); return; }
+
+    if (G.running && !G.paused && !G.quizActive) {
+        updateSky(dt);
+        updateGame(dt, now);
+    } else if (!G.running) {
+        // Idle: rotate player slowly for start screen (if visible)
+        playerGroup && (playerGroup.rotation.y = Math.sin(now * 0.5) * 0.15);
+    }
+
+    renderer.render(scene, camera);
+}
+
+function updateGame(dt, now) {
+    // ── Speed & Score ──
+    G.speed = Math.min(G.speed + C.SPEED_ACCEL * dt, C.SPEED_MAX);
+    G.dist += G.speed * dt;
+    // Gộp điểm: Xu + Quãng đường
+    G.score = Math.floor(G.dist + G.coins * 100);
+    G.maxSpeed = Math.max(G.maxSpeed, G.speed);
+
+    // ── Process input queue (frame-accurate) ──
+    while (G.inputQueue.length > 0) {
+        const cmd = G.inputQueue.shift();
+        if (cmd === 'left') processLeft();
+        else if (cmd === 'right') processRight();
+        else if (cmd === 'jump') processJump();
+        else if (cmd === 'slide') processSlide();
+    }
+
+    // ── HUD ──
+    updateHUD();
+
+    // ── Determine target Y (Platforming) ──
+    let groundY = C.PLAYER_Y;
+    let onPlatform = false;
+    for (const obs of activeObstacles) {
+        const t = obs.userData.typeData;
+        if (t.isPlatform) {
+            const dz = obs.position.z - playerGroup.position.z;
+            const hLen = (t.length || 0) / 2;
+            const dx = Math.abs(obs.position.x - playerGroup.position.x);
+            if (dx < 1.1 && dz > -hLen - 0.3 && dz < hLen + 0.3) {
+                groundY = Math.max(groundY, C.PLAYER_Y + t.roofHeight);
+                onPlatform = true;
+            }
+        }
+    }
+
+    // ── Player X (Lerp to target lane) ──
+    const px = playerGroup.position.x;
+    playerGroup.position.x += (G.targetX - px) * C.LANE_LERP * dt;
+
+    // ── Player Vertical Physics (Gravity) ──
+    if (playerGroup.position.y > groundY || G.jumping) {
+        G.velY += C.GRAVITY * dt;
+        playerGroup.position.y += G.velY * dt;
+        
+        if (playerGroup.position.y <= groundY && G.velY <= 0) {
+            playerGroup.position.y = groundY;
+            G.jumping = false; 
+            G.velY = 0;
+            if (!G.sliding) playerGroup.scale.y = 1;
+        }
+    } else if (playerGroup.position.y < groundY && !G.jumping && !G.invincible) {
+        // Player slid into or ran into the front of a platform. Handled by collision below.
+    }
+
+    // ── Player Slide ──
+    if (G.sliding) {
+        G.slideTimer -= dt;
+        if (G.slideTimer <= 0) {
+            G.sliding = false;
+            playerGroup.scale.y = 1;
+            playerGroup.position.y = groundY; // Stand back up
+        }
+    }
+
+    // ── Invincibility ──
+    if (G.invincible) {
+        G.invTimer -= dt;
+        // Flash: toggle emissive
+        playerMat.emissiveIntensity = Math.sin(now * 20) * 0.4 + 0.4;
+        playerMat.emissive.set(0xf0a500);
+        DOM['inv-timer'].textContent = G.invTimer.toFixed(1);
+        if (G.invTimer <= 0) {
+            G.invincible = false;
+            playerMat.emissiveIntensity = 0;
+            playerMat.emissive.set(0x000000);
+            DOM['invincible-badge'].classList.add('hidden');
+        }
+    }
+
+    // ── Run Animation ──
+    const runF = Math.sin(now * (G.speed / C.SPEED_START) * 8);
+    if (G.pc.legL) G.pc.legL.rotation.x = runF * 0.4;
+    if (G.pc.legR) G.pc.legR.rotation.x = -runF * 0.4;
+    if (G.pc.arm0) G.pc.arm0.rotation.x = -runF * 0.3;
+    if (G.pc.arm1) G.pc.arm1.rotation.x = runF * 0.3;
+    playerGroup.position.y = G.jumping ? playerGroup.position.y
+        : C.PLAYER_Y + Math.abs(Math.sin(now * G.speed * 0.5)) * 0.05;
+
+    // ── Track Scroll ──
+    const moveZ = G.speed * dt;
+    for (const seg of trackSegs) {
+        seg.position.z += moveZ;
+        if (seg.position.z > camera.position.z + C.SEG_LEN * 0.6) {
+            seg.position.z -= C.SEG_COUNT * C.SEG_LEN;
+        }
+    }
+
+    // ── Camera follow (lag behind X slightly) ──
+    camera.position.x += (playerGroup.position.x * 0.12 - camera.position.x) * 3.5 * dt;
+    // Lean forward slightly with speed
+    const camZ = 10 - (G.speed - C.SPEED_START) * 0.06;
+    camera.position.z += (camZ - camera.position.z) * 2 * dt;
+
+    // ── Spawn Timers ──
+    G.spawnCooldown -= dt;
+    if (G.spawnCooldown <= 0) {
+        spawnObstacle();
+        G.spawnCooldown = Math.max(0.3, 1.2 - G.speed * 0.015);
+    }
+    G.coinSpawnCd -= dt;
+    if (G.coinSpawnCd <= 0) {
+        spawnCoin();
+        G.coinSpawnCd = Math.max(1.2, 3.0 - G.speed * 0.02);
+    }
+
+    // ── Update Obstacles ──
+    for (let i = activeObstacles.length - 1; i >= 0; i--) {
+        const obs = activeObstacles[i];
+        
+        let obsMoveZ = moveZ;
+        if (obs.userData.typeData.moveSpeed) {
+            obsMoveZ += obs.userData.typeData.moveSpeed * dt;
+        }
+        obs.position.z += obsMoveZ;
+
+        // Frustum cull: skip collision check if not in view band
+        const despawnZBound = C.DESPAWN_Z + (obs.userData.typeData.length || 0) / 2;
+        if (obs.position.z > despawnZBound) {
+            obs.visible = false; obs.userData.active = false;
+            activeObstacles.splice(i, 1);
+            continue;
+        }
+
+        // ── COLLISION ──
+        if (!G.invincible) {
+            const t = obs.userData.typeData;
+            
+            // If player is safely on top of this platform, skip crash
+            if (t.isPlatform && playerGroup.position.y >= C.PLAYER_Y + t.roofHeight - 0.2) {
+                continue;
+            }
+
+            const dz = Math.abs(obs.position.z - playerGroup.position.z);
+            const dx = Math.abs(obs.position.x - playerGroup.position.x);
+            
+            // Train/Long obstacles have bigger Z hitbox
+            const hitDz = t.length ? (t.length / 2 + 0.45) : 1.1;
+
+            if (dz < hitDz && dx < 1.3) {
+                // Dodge checks
+                const dodgedJump = G.jumping && (playerGroup.position.y > t.jumpTop);
+                const dodgedSlide = G.sliding && (t.slideBottom > 0.9);
+                if (!dodgedJump && !dodgedSlide) {
+                    AudioSystem.collide();
+                    spawnParticles(obs.position, 10, 0xff4444);
+                    triggerCollision(i);
+                    return; // stop game loop body, waiting for quiz
+                }
+            }
+        }
+    }
+
+    // ── Update Coins ──
+    for (let i = activeCoins.length - 1; i >= 0; i--) {
+        const coin = activeCoins[i];
+        coin.position.z += moveZ;
+        coin.rotation.y += dt * 3;
+        coin.position.y = 1.4 + Math.sin(now * 5 + i) * 0.12;
+
+        if (coin.position.z > C.DESPAWN_Z) {
+            coin.visible = false; coin.userData.active = false;
+            activeCoins.splice(i, 1); continue;
+        }
+
+        // Collect coin
+        const cdz = Math.abs(coin.position.z - playerGroup.position.z);
+        const cdx = Math.abs(coin.position.x - playerGroup.position.x);
+        if (cdz < 1.0 && cdx < 1.3 && Math.abs(coin.position.y - playerGroup.position.y - 0.5) < 1.2) {
+            G.coins++;
+            G.score += 100; // Coins directly increase score
+            AudioSystem.coin();
+            spawnParticles(coin.position, 5, 0xffd700);
+            coin.visible = false; coin.userData.active = false;
+            activeCoins.splice(i, 1);
+        }
+    }
+
+    // ── Update Particles ──
+    for (let i = activeParticles.length - 1; i >= 0; i--) {
+        const p = activeParticles[i];
+        p.userData.life += dt;
+        const t = p.userData.life / p.userData.maxLife;
+        if (t >= 1) {
+            p.visible = false; p.userData.active = false;
+            activeParticles.splice(i, 1); continue;
+        }
+        p.position.x += p.userData.vel.x * dt;
+        p.position.y += p.userData.vel.y * dt;
+        p.position.z += p.userData.vel.z * dt + moveZ;
+        p.userData.vel.y += C.GRAVITY * 0.4 * dt;
+        p.material.opacity = 1 - t;
+        p.scale.setScalar(1 - t * 0.6);
+    }
+}
+
+// ═══════════════════════════════════════════
+// 11. HUD UPDATE
+// ═══════════════════════════════════════════
+let lastHudUpdate = 0;
+function updateHUD() {
+    const now = Date.now();
+    if (now - lastHudUpdate < 30) return; // Cap HUD updates to ~30fps
+    lastHudUpdate = now;
+
+    if (!DOM['current-score']) return;
+    DOM['current-score'].textContent = G.score;
+    DOM['hud-distance'].textContent = Math.floor(G.dist) + 'm';
+
+    const pct = ((G.speed - C.SPEED_START) / (C.SPEED_MAX - C.SPEED_START)) * 100;
+    DOM['speed-fill'].style.width = Math.min(100, pct) + '%';
+}
+
+// ═══════════════════════════════════════════
+// 12. INPUT SYSTEM (Frame-Accurate Queue)
+// ═══════════════════════════════════════════
+function setupInput() {
+    // Keyboard
+    document.addEventListener('keydown', e => {
+        if (!G.running || G.quizActive) return;
+
+        if (e.key === 'Escape' || e.key === 'p') { togglePause(); return; }
+        if (G.paused || G.quizActive) return;
+
+        switch (e.key) {
+            case 'ArrowLeft': case 'a': G.inputQueue.push('left'); e.preventDefault(); break;
+            case 'ArrowRight': case 'd': G.inputQueue.push('right'); e.preventDefault(); break;
+            case 'ArrowUp': case 'w': G.inputQueue.push('jump'); e.preventDefault(); break;
+            case 'ArrowDown': case 's': G.inputQueue.push('slide'); e.preventDefault(); break;
+        }
+    });
+
+    // Touch swipe (highly responsive)
+    let tx0 = 0, ty0 = 0, tTime = 0;
+    const SWIPE_MIN = 20;
+    const SWIPE_TIME = 250; // ms
+
+    document.addEventListener('touchstart', e => {
+        if (e.target.closest('.audio-controls, .quiz-card, .gameover-card, .start-panel, .form-section, .form-card, .brand-section, .pause-card')) return;
+        tx0 = e.touches[0].clientX;
+        ty0 = e.touches[0].clientY;
+        tTime = Date.now();
+    }, { passive: true });
+
+    document.addEventListener('touchend', e => {
+        if (!G.running || G.quizActive || G.paused) return;
+        if (Date.now() - tTime > SWIPE_TIME) return; // Too slow
+        const dx = e.changedTouches[0].clientX - tx0;
+        const dy = e.changedTouches[0].clientY - ty0;
+        const adx = Math.abs(dx), ady = Math.abs(dy);
+
+        if (adx < SWIPE_MIN && ady < SWIPE_MIN) return; // Too short
+
+        if (adx > ady) {
+            G.inputQueue.push(dx > 0 ? 'right' : 'left');
+        } else {
+            G.inputQueue.push(dy < 0 ? 'jump' : 'slide');
+        }
+    }, { passive: true });
+}
+
+function processLeft() {
+    if (G.laneIdx > 0) {
+        G.laneIdx--;
+        G.targetX = C.LANES[G.laneIdx];
+        AudioSystem.lane();
+    }
+}
+function processRight() {
+    if (G.laneIdx < 2) {
+        G.laneIdx++;
+        G.targetX = C.LANES[G.laneIdx];
+        AudioSystem.lane();
+    }
+}
+function processJump() {
+    if (!G.jumping) {
+        if (G.sliding) cancelSlide();
+        G.jumping = true;
+        G.velY = C.JUMP_FORCE;
+        AudioSystem.jump();
+    }
+}
+function processSlide() {
+    if (!G.jumping && !G.sliding) {
+        G.sliding = true;
+        G.slideTimer = C.SLIDE_DUR;
+        playerGroup.scale.y = 0.52;
+        playerGroup.position.y = C.PLAYER_Y * 0.52;
+        AudioSystem.slide();
+    }
+}
+
+// ── Fish-Yates Shuffle ──
+function shuffleArray(array) {
+    for (let i = array.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [array[i], array[j]] = [array[j], array[i]];
+    }
+}
+function cancelSlide() {
+    G.sliding = false; G.slideTimer = 0;
+    playerGroup.scale.y = 1;
+    playerGroup.position.y = C.PLAYER_Y;
+}
+
+// ── Math Symbol Formatter ──
+function formatQuizText(text) {
+    if (!text) return "";
+    return text
+        .replace(/\^2/g, '²')
+        .replace(/\^3/g, '³')
+        .replace(/\^n/g, 'ⁿ')
+        .replace(/\*/g, '×')
+        .replace(/\//g, '÷')
+        .replace(/sqrt\((.*?)\)/g, '√$1')
+        .replace(/\\cos/g, 'cos')
+        .replace(/\\sin/g, 'sin')
+        .replace(/\\tan/g, 'tan')
+        .replace(/\\pi/g, 'π')
+        .replace(/\\Delta/g, 'Δ')
+        .replace(/\\alpha/g, 'α')
+        .replace(/\\beta/g, 'β')
+        .replace(/<=/g, '≤')
+        .replace(/>=/g, '≥');
+}
+
+// ═══════════════════════════════════════════
+// 13. GAME LIFECYCLE
+// ═══════════════════════════════════════════
+function startGame() {
+    const nameInput = document.getElementById('player-name').value.trim();
+    const finalName = nameInput || localStorage.getItem('httt_player_name') || 'Người hùng';
+    
+    // Ensure persistence
+    localStorage.setItem('httt_player_name', finalName);
+
+    resetGameState(true);
+    G.playerName = finalName;
+    G.running = true;
+    G.lastTime = performance.now() / 1000;
+
+    // Reset player
+    playerGroup.position.set(C.LANES[1], C.PLAYER_Y, 0);
+    playerGroup.rotation.set(0, 0, 0);
+    playerGroup.scale.set(1, 1, 1);
+    playerMat.emissiveIntensity = 0;
+    playerMat.emissive.set(0x000000);
+
+    // Clear all pools
+    [...activeObstacles, ...activeCoins, ...activeParticles].forEach(m => {
+        m.visible = false; m.userData.active = false;
+    });
+    activeObstacles.length = 0;
+    activeCoins.length = 0;
+    activeParticles.length = 0;
+    collisionObs = null;
+
+    // UI
+    document.getElementById('loading-screen').classList.remove('active');
+    document.getElementById('start-screen').classList.remove('active');
+    document.getElementById('game-over-screen').classList.remove('active');
+    document.getElementById('pause-screen').classList.remove('active');
+    document.getElementById('hud').classList.add('active');
+    document.getElementById('invincible-badge').classList.add('hidden');
+
+    // Play first music track (random start)
+    AudioSystem.resume();
+    const trackIdx = Math.floor(Math.random() * AudioSystem.getTracksCount());
+    AudioSystem.playTrack(trackIdx);
+}
+
+function togglePause() {
+    if (!G.running || G.quizActive) return;
+    G.paused = !G.paused;
+    const ps = document.getElementById('pause-screen');
+    if (G.paused) {
+        ps.classList.add('active');
+        document.getElementById('pause-score-val').textContent = G.score;
+    } else {
+        ps.classList.remove('active');
+        G.lastTime = performance.now() / 1000; // reset dt to prevent spike
+    }
+}
+
+function goToMenu() {
+    G.running = false;
+    document.getElementById('game-over-screen').classList.remove('active');
+    document.getElementById('pause-screen').classList.remove('active');
+    document.getElementById('hud').classList.remove('active');
+    document.getElementById('start-screen').classList.add('active');
+    updateStartScreenStats();
+}
+
+// ═══════════════════════════════════════════
+// 14. COLLISION → QUIZ REVIVE
+// ═══════════════════════════════════════════
+function triggerCollision(obsIdx) {
+    G.quizActive = true;
+    collisionObs = activeObstacles[obsIdx];
+
+    const modal = document.getElementById('quiz-modal');
+    modal.classList.add('active');
+
+    const qData = getRandomQuestion();
+    document.getElementById('question-text').innerHTML = formatQuizText(qData.q);
+    document.getElementById('quiz-category').textContent = qData.cat || 'Câu hỏi';
+    document.getElementById('quiz-streak').textContent = `🔥 ${G.reviveStreak} liên tiếp`;
+
+    // Shuffle answers while keeping track of correct one
+    const answers = qData.a.map((text, i) => ({ text, isCorrect: i === qData.correct }));
+    shuffleArray(answers);
+
+    const correctIdx = answers.findIndex(a => a.isCorrect);
+
+    const cont = document.getElementById('answers-container');
+    cont.innerHTML = '';
+    answers.forEach((ans, i) => {
+        const btn = document.createElement('button');
+        btn.className = 'answer-btn';
+        btn.innerHTML = formatQuizText(ans.text);
+        btn.onclick = () => handleAnswer(i, correctIdx, btn);
+        cont.appendChild(btn);
+    });
+
+    // Timer bar countdown
+    let timeLeft = C.QUIZ_TIMEOUT;
+    const bar = document.getElementById('quiz-timer-bar');
+    const numEl = document.getElementById('quiz-timer-num');
+    bar.style.transition = 'none'; bar.style.width = '100%';
+    bar.style.background = 'var(--c-accent)';
+
+    requestAnimationFrame(() => {
+        bar.style.transition = `width ${C.QUIZ_TIMEOUT}s linear`;
+        bar.style.width = '0%';
+    });
+
+    quizCountdown = setInterval(() => {
+        timeLeft--;
+        numEl.textContent = timeLeft;
+        if (timeLeft <= 3) bar.style.background = 'var(--c-danger)';
+    }, 1000);
+
+    quizTimer = setTimeout(() => triggerGameOver(), C.QUIZ_TIMEOUT * 1000);
+}
+
+function handleAnswer(selected, correct, btnEl) {
+    clearTimeout(quizTimer);
+    clearInterval(quizCountdown);
+    document.querySelectorAll('.answer-btn').forEach(b => b.disabled = true);
+
+    if (selected === correct) {
+        btnEl.classList.add('correct');
+        G.correctAnswers++;
+        G.reviveStreak++;
+        AudioSystem.correct();
+        setTimeout(() => doRevive(), 800);
+    } else {
+        btnEl.classList.add('wrong');
+        document.querySelectorAll('.answer-btn')[correct].classList.add('correct');
+        G.reviveStreak = 0;
+        AudioSystem.wrong();
+        setTimeout(() => triggerGameOver(), 1400);
+    }
+}
+
+function doRevive() {
+    document.getElementById('quiz-modal').classList.remove('active');
+    G.quizActive = false;
+    G.lastTime = performance.now() / 1000; // reset dt after pause
+
+    // Remove the obstacle we collided with
+    if (collisionObs) {
+        collisionObs.visible = false;
+        collisionObs.userData.active = false;
+        const idx = activeObstacles.indexOf(collisionObs);
+        if (idx > -1) activeObstacles.splice(idx, 1);
+        collisionObs = null;
+    }
+
+    G.invincible = true;
+    G.invTimer = C.INVINCIBLE_DUR;
+    document.getElementById('invincible-badge').classList.remove('hidden');
+    document.getElementById('inv-timer').textContent = C.INVINCIBLE_DUR.toFixed(1);
+}
+
+// ═══════════════════════════════════════════
+// 15. GAME OVER
+// ═══════════════════════════════════════════
+function triggerGameOver() {
+    clearTimeout(quizTimer);
+    clearInterval(quizCountdown);
+
+    G.running = false;
+    G.quizActive = false;
+
+    document.getElementById('quiz-modal').classList.remove('active');
+    document.getElementById('hud').classList.remove('active');
+    document.getElementById('pause-screen').classList.remove('active');
+
+    saveScore(G.playerName, G.score, {
+        dist: Math.floor(G.dist),
+        coins: G.coins,
+        correct: G.correctAnswers,
+        maxSpeed: Math.floor(G.maxSpeed),
+    });
+
+    // Populate game-over UI
+    document.getElementById('go-player-name').textContent = G.playerName || 'Người hùng';
+    document.getElementById('final-score').textContent = G.score;
+    document.getElementById('go-distance').textContent = Math.floor(G.dist) + 'm';
+    document.getElementById('go-coins').textContent = G.coins;
+    document.getElementById('go-correct').textContent = G.correctAnswers;
+    document.getElementById('go-max-speed').textContent = Math.floor(G.maxSpeed);
+
+    renderLeaderboard();
+    document.getElementById('game-over-screen').classList.add('active');
+}
+
+// ═══════════════════════════════════════════
+// 16. LEADERBOARD - LocalStorage WRAPPERS
+//    (Replace body with Firebase/Supabase API calls later)
+// ═══════════════════════════════════════════
+const SCORE_KEY = 'httt_v2_scores';
+
+function getScores() {
+    try { return JSON.parse(localStorage.getItem(SCORE_KEY) || '[]'); }
+    catch { return []; }
+}
+
+function saveScore(name, score, stats = {}) {
+    if (!name) name = localStorage.getItem('httt_player_name') || 'Người hùng';
+    const scores = getScores();
+    scores.push({ 
+        name: String(name).substring(0, 15), 
+        score: Number(score) || 0, 
+        stats, 
+        date: new Date().toLocaleDateString('vi-VN') 
+    });
+    scores.sort((a, b) => b.score - a.score);
+    localStorage.setItem(SCORE_KEY, JSON.stringify(scores.slice(0, 30)));
+    
+    // Also update total plays
+    const total = parseInt(localStorage.getItem('httt_total_plays') || '0');
+    localStorage.setItem('httt_total_plays', total + 1);
+}
+
+function renderLeaderboard() {
+    const scores = getScores();
+    const ul = document.getElementById('leaderboard-list');
+    ul.innerHTML = '';
+    const icons = ['1.', '2.', '3.']; 
+
+    if (scores.length === 0) {
+        ul.innerHTML = '<li style="text-align:center;color:var(--c-muted);padding:12px 0">Chưa có điểm nào!</li>';
+        return;
+    }
+
+    scores.slice(0, 5).forEach((s, i) => {
+        const li = document.createElement('li');
+        if (s.name === G.playerName && s.score === G.score) li.classList.add('is-current');
+        li.innerHTML = `
+            <span class="lb-rank">${icons[i] || (i + 1) + '.'}</span>
+            <span class="lb-name">${s.name || 'Người hùng'}</span>
+            <span class="lb-score">${s.score}</span>
+        `;
+        ul.appendChild(li);
+    });
+}
+
+function updateStartScreenStats() {
+    const scores = getScores();
+    const total = localStorage.getItem('httt_total_plays') || '0';
+    document.getElementById('stat-total-players').textContent = parseInt(total) + scores.length;
+    document.getElementById('stat-top-score').textContent = scores[0]?.score ?? '—';
+}
+
+// ═══════════════════════════════════════════
+// 17. START SCREEN BACKGROUND ANIMATION
+// ═══════════════════════════════════════════
+function initBgCanvas() {
+    const canvas = document.getElementById('bg-canvas');
+    if (!canvas) return;
+    const ctx2d = canvas.getContext('2d');
+    canvas.width = innerWidth;
+    canvas.height = innerHeight;
+
+    const dots = Array.from({ length: 45 }, () => ({
+        x: Math.random() * canvas.width,
+        y: Math.random() * canvas.height,
+        r: Math.random() * 1.5 + 0.5,
+        vx: (Math.random() - 0.5) * 0.35,
+        vy: (Math.random() - 0.5) * 0.35,
+        a: Math.random(),
+    }));
+
+    function drawBg() {
+        const isActive = document.getElementById('start-screen').classList.contains('active');
+        ctx2d.clearRect(0, 0, canvas.width, canvas.height);
+
+        ctx2d.beginPath();
+        dots.forEach(d => {
+            d.x = (d.x + d.vx + canvas.width) % canvas.width;
+            d.y = (d.y + d.vy + canvas.height) % canvas.height;
+            d.a = (Math.sin(Date.now() * 0.001 + d.r) + 1) / 2 * 0.5 + 0.1;
+            ctx2d.moveTo(d.x, d.y);
+            ctx2d.arc(d.x, d.y, d.r, 0, Math.PI * 2);
+        });
+        ctx2d.fillStyle = isActive ? `rgba(240,165,0,0.45)` : `rgba(240,165,0,0.15)`;
+        ctx2d.fill();
+
+        // Optimized connectors: Single path for all segments
+        ctx2d.beginPath();
+        ctx2d.strokeStyle = isActive ? 'rgba(240,165,0,0.12)' : 'rgba(240,165,0,0.05)';
+        ctx2d.lineWidth = 0.5;
+        for (let i = 0; i < dots.length; i++) {
+            const a = dots[i];
+            for (let j = i + 1; j < dots.length; j++) {
+                const b = dots[j];
+                const dx = a.x - b.x;
+                const dy = a.y - b.y;
+                if (Math.abs(dx) < 90 && Math.abs(dy) < 90) {
+                    const dist = dx * dx + dy * dy;
+                    if (dist < 8100) { // 90^2
+                        ctx2d.moveTo(a.x, a.y);
+                        ctx2d.lineTo(b.x, b.y);
+                    }
+                }
+            }
+        }
+        ctx2d.stroke();
+        requestAnimationFrame(drawBg);
+    }
+    drawBg();
+
+    window.addEventListener('resize', () => {
+        canvas.width = innerWidth; canvas.height = innerHeight;
+    });
+}
+
+// ═══════════════════════════════════════════
+// 18. UI EVENT BINDINGS
+// ═══════════════════════════════════════════
+function bindUI() {
+    // Mode selector
+    document.querySelectorAll('.mode-card').forEach(card => {
+        card.addEventListener('click', () => {
+            document.querySelectorAll('.mode-card').forEach(c => c.classList.remove('active'));
+            card.classList.add('active');
+            G.mode = Number(card.dataset.mode);
+        });
+    });
+
+    // Start Button
+    const startBtn = document.getElementById('start-btn');
+    if (startBtn) {
+        startBtn.addEventListener('click', () => {
+            AudioSystem.resume();
+            const nameEl = document.getElementById('player-name');
+            const name = nameEl.value.trim();
+            if (!name) {
+                nameEl.focus();
+                nameEl.classList.add('shake');
+                nameEl.style.border = '1.5px solid var(--c-danger)';
+                setTimeout(() => {
+                    nameEl.classList.remove('shake');
+                    nameEl.style.border = '';
+                }, 1000);
+                return;
+            }
+            // Logic moved to startGame to avoid duplication
+            startGame();
+        });
+    }
+
+    // Custom Room Logic
+    const btnCreateRoom = document.getElementById('btn-create-room');
+    if (btnCreateRoom) {
+        btnCreateRoom.addEventListener('click', () => {
+            document.getElementById('custom-room-screen').classList.add('active');
+            const existing = localStorage.getItem('httt_custom_q');
+            if (existing) {
+                document.getElementById('custom-q-input').value = existing;
+            } else {
+                document.getElementById('custom-q-input').value = '';
+            }
+            document.getElementById('room-status').textContent = '';
+        });
+    }
+
+    const btnCloseRoom = document.getElementById('btn-close-room');
+    if (btnCloseRoom) {
+        btnCloseRoom.addEventListener('click', () => {
+            document.getElementById('custom-room-screen').classList.remove('active');
+        });
+    }
+
+    const btnSaveRoom = document.getElementById('btn-save-room');
+    if (btnSaveRoom) {
+        btnSaveRoom.addEventListener('click', () => {
+            const val = document.getElementById('custom-q-input').value.trim();
+            const status = document.getElementById('room-status');
+            if (!val) {
+                 localStorage.removeItem('httt_custom_q');
+                 status.style.color = 'var(--c-success)';
+                 status.textContent = 'Đã hủy Custom Room. Trở về bộ câu hỏi gốc.';
+                 if (typeof loadCustomQuestions === 'function') loadCustomQuestions();
+                 setTimeout(() => document.getElementById('custom-room-screen').classList.remove('active'), 1500);
+                 return;
+            }
+            try {
+                const parsed = JSON.parse(val);
+                if (!Array.isArray(parsed) || parsed.length === 0 || !parsed[0].q || !parsed[0].a) throw new Error('Format không đúng');
+                localStorage.setItem('httt_custom_q', val);
+                status.style.color = 'var(--c-success)';
+                status.textContent = 'Lưu thành công ' + parsed.length + ' câu hỏi!';
+                if (typeof loadCustomQuestions === 'function') loadCustomQuestions();
+                setTimeout(() => document.getElementById('custom-room-screen').classList.remove('active'), 1500);
+            } catch(e) {
+                status.style.color = 'var(--c-danger)';
+                status.textContent = 'Lưu thất bại: JSON không hợp lệ!';
+            }
+        });
+    }
+
+    // Restart
+    document.getElementById('restart-btn').addEventListener('click', () => {
+        AudioSystem.resume();
+        startGame();
+    });
+
+    // Menu button
+    document.getElementById('btn-menu').addEventListener('click', goToMenu);
+
+    // Pause buttons
+    document.getElementById('btn-resume').addEventListener('click', togglePause);
+    document.getElementById('btn-quit').addEventListener('click', () => {
+        G.paused = false;
+        document.getElementById('pause-screen').classList.remove('active');
+        triggerGameOver();
+    });
+
+    // Audio controls
+    const btnMute = document.getElementById('btn-mute');
+    if (btnMute) {
+        btnMute.addEventListener('click', () => {
+            AudioSystem.resume();
+            AudioSystem.mute();
+        });
+    }
+
+    const btnNext = document.getElementById('btn-next-track');
+    if (btnNext) {
+        btnNext.addEventListener('click', () => {
+            AudioSystem.resume();
+            AudioSystem.nextTrack();
+        });
+    }
+}
+
+// ═══════════════════════════════════════════
+// 19. RESIZE
+// ═══════════════════════════════════════════
+function onResize() {
+    if (!camera || !renderer) return;
+    const root = document.getElementById('game-root');
+    if (!root) return;
+    const w = root.clientWidth || window.innerWidth;
+    const h = root.clientHeight || window.innerHeight;
+    camera.aspect = w / h;
+    camera.updateProjectionMatrix();
+    renderer.setSize(w, h, false); // false to avoid overriding inline styles heavily
+}
+
+// ═══════════════════════════════════════════
+// 20. BOOT SEQUENCE
+// ═══════════════════════════════════════════
+(function boot() {
+    // 1. Show loading screen
+    document.getElementById('loading-screen').classList.add('active');
+
+    // 2. Init audio
+    AudioSystem.init();
+
+    // 3. Init UI bindings
+    bindUI();
+
+    // 4. Init Three.js (may take a frame or two)
+    initThree();
+
+    // 5. Animated loader
+    const bar = document.getElementById('loader-bar');
+    const txt = document.getElementById('loader-text');
+    const tips = [
+        'Đang tải WebGL...', 'Đang xây dựng môi trường 3D...',
+        'Đang thiết lập logic...', 'Đang nạp ngân hàng câu hỏi...',
+        'Gần xong rồi...', 'Sẵn sàng chinh phục!'
+    ];
+    let step = 0;
+    
+    // Tách phần cache HUD ra ngoài interval (tránh chạy lặp)
+    ['current-score', 'hud-distance', 'speed-fill', 'invincible-badge', 'inv-timer'].forEach(id => {
+        DOM[id] = document.getElementById(id);
+    });
+
+    const interval = setInterval(() => {
+        try {
+            if (step < tips.length - 1) {
+                step++;
+                bar.style.width = (step / tips.length * 100) + '%';
+                txt.textContent = tips[step - 1] || 'Vui lòng chờ...';
+            } else if (G.worldReady) {
+                bar.style.width = '100%';
+                txt.textContent = 'Sẵn sàng!';
+                clearInterval(interval);
+                setTimeout(() => {
+                    document.getElementById('loading-screen').classList.remove('active');
+                    document.getElementById('start-screen').classList.add('active');
+                    initBgCanvas();
+                    const savedName = localStorage.getItem('httt_player_name');
+                    if (savedName) document.getElementById('player-name').value = savedName;
+                    updateStartScreenStats();
+                    // Setup resize once again to be sure after loaded UI
+                    onResize();
+                }, 300);
+            }
+        } catch(e) {
+            console.error("Boot loop error:", e);
+            clearInterval(interval); // Kẹt thì huỷ luôn
+        }
+    }, 150);
+})();
+

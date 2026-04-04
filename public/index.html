@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <meta name="description" content="Run&Ask - Game chạy vô tận 3D kết hợp trả lời câu hỏi tri thức">
+    <meta name="theme-color" content="#0d1117">
+    <title>Run&Ask</title>
+    <link href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;500;600;700&family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="css/style.css">
+    <link rel="icon" type="image/png" href="assets/favicon.png">
+</head>
+<body oncontextmenu="return false" ondragstart="return false">
+<div id="game-root">
+
+    <!-- ══════════════════════════════════════════
+         LOADING SCREEN
+    ══════════════════════════════════════════ -->
+    <div id="loading-screen" class="screen active">
+        <div class="loader-content">
+            <div class="loader-logo">
+                <div class="loader-icon"></div>
+                <h1>Run&Ask</h1>
+            </div>
+            <div class="loader-bar-wrap">
+                <div id="loader-bar"></div>
+            </div>
+            <p id="loader-text" class="loader-tip">Đang khởi tạo...</p>
+        </div>
+    </div>
+
+    <!-- ══════════════════════════════════════════
+         START SCREEN
+    ══════════════════════════════════════════ -->
+    <div id="start-screen" class="screen">
+        <!-- Animated particles background (drawn by JS) -->
+        <canvas id="bg-canvas"></canvas>
+
+        <div class="start-layout">
+            <!-- Left: Branding -->
+            <div class="brand-section">
+                <div class="brand-badge">ENDLESS RUNNER × TRIVIA</div>
+                <h1 class="brand-title">Run&<em>Ask</em></h1>
+                <p class="brand-desc">Chạy. Nhảy. Trả lời. Chinh phục.<br>Thử thách kiến thức trong từng bước chạy.</p>
+
+                <div class="brand-stats">
+                    <div class="stat-item">
+                        <span class="stat-num" id="stat-top-score">0</span>
+                        <span class="stat-label">ĐIỂM CAO NHẤT</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-num" id="stat-total-players">0</span>
+                        <span class="stat-label">TỔNG NGƯỜI CHƠI</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Right: Form -->
+            <div class="form-section">
+                <div class="form-card">
+                    <h2 class="form-title">Bắt đầu hành trình</h2>
+
+                    <div class="field-group">
+                        <label class="field-label">TÊN NGƯỜI CHƠI</label>
+                        <div class="input-wrap">
+                            <span class="input-icon"></span>
+                            <input type="text" id="player-name" placeholder="Nhập biệt danh..." maxlength="15" autocomplete="off">
+                        </div>
+                    </div>
+
+                    <button id="start-btn" class="btn-start">
+                        <span class="btn-start-text">BẮT ĐẦU</span>
+                    </button>
+                    <button id="btn-create-room" class="btn-outline" style="margin-top:-8px;">
+                        TỰ TẠO PHÒNG (CUSTOM)
+                    </button>
+
+                    <div class="controls-row">
+                        <div class="control-chip"><kbd>←</kbd><kbd>→</kbd> Chuyển làn</div>
+                        <div class="control-chip"><kbd>↑</kbd> Nhảy</div>
+                        <div class="control-chip"><kbd>↓</kbd> Trượt</div>
+                        <div class="control-chip">📱 Vuốt</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- ══════════════════════════════════════════
+         HUD (IN-GAME)
+    ══════════════════════════════════════════ -->
+    <div id="hud" class="screen">
+        <!-- Top bar -->
+        <div class="hud-top">
+            <div class="hud-block">
+                <div class="hud-lbl">ĐIỂM</div>
+                <div id="current-score" class="hud-val">0</div>
+            </div>
+            <div class="hud-block hud-center-block">
+                <div class="hud-lbl">KHOẢNG CÁCH</div>
+                <div id="hud-distance" class="hud-val hud-val-sm">0m</div>
+            </div>
+            <div class="hud-block hud-right">
+                <!-- Unified score used instead -->
+            </div>
+        </div>
+
+        <!-- Speed meter -->
+        <div class="hud-speed-wrap">
+            <div class="speed-label">TỐC ĐỘ</div>
+            <div class="speed-bar"><div id="speed-fill"></div></div>
+        </div>
+
+        <!-- Invincible badge -->
+        <div id="invincible-badge" class="inv-badge hidden">BẤT TỬ <span id="inv-timer">2.5</span>s</div>
+
+        <!-- Audio controls (always visible) -->
+        <!-- Audio controls removed for cleaner UI as requested -->
+    </div>
+
+    <!-- ══════════════════════════════════════════
+         QUIZ MODAL (REVIVE)
+    ══════════════════════════════════════════ -->
+    <div id="quiz-modal" class="screen overlay">
+        <div class="quiz-card">
+            <!-- Header -->
+            <div class="quiz-header">
+                <div class="quiz-streak" id="quiz-streak">🔥 0 câu liên tiếp</div>
+                <div class="quiz-tag" id="quiz-category">Toán học</div>
+            </div>
+
+            <!-- Title -->
+            <div class="quiz-revive-banner">
+                <span class="revive-icon"></span>
+                <div>
+                    <div class="revive-title">Cơ Hội Hồi Sinh!</div>
+                    <div class="revive-sub">Trả lời đúng để tiếp tục hành trình</div>
+                </div>
+            </div>
+
+            <!-- Timer bar -->
+            <div class="quiz-timer-wrap">
+                <div class="quiz-timer-track"><div id="quiz-timer-bar"></div></div>
+                <div id="quiz-timer-num" class="quiz-timer-num">10</div>
+            </div>
+
+            <!-- Question -->
+            <p id="question-text" class="question-body">Đang tải câu hỏi...</p>
+
+            <!-- Answers -->
+            <div id="answers-container" class="answers-grid"></div>
+        </div>
+    </div>
+
+    <!-- ══════════════════════════════════════════
+         PAUSE MENU
+    ══════════════════════════════════════════ -->
+    <div id="pause-screen" class="screen overlay">
+        <div class="pause-card">
+            <h2 class="pause-title">Tạm Dừng</h2>
+            <div class="pause-score">Điểm hiện tại: <strong id="pause-score-val">0</strong></div>
+            <button id="btn-resume" class="btn-outline">TIẾP TỤC</button>
+            <button id="btn-quit" class="btn-danger">THOÁT GAME</button>
+        </div>
+    </div>
+
+    <!-- ══════════════════════════════════════════
+         GAME OVER SCREEN
+    ══════════════════════════════════════════ -->
+    <div id="game-over-screen" class="screen overlay">
+        <div class="gameover-card">
+            <!-- Top strip -->
+            <div class="go-header">
+                <div class="go-icon"></div>
+                <h1 class="go-title">Game Over</h1>
+                <div class="go-player" id="go-player-name"></div>
+            </div>
+
+            <!-- Score breakdown -->
+            <div class="go-score-section">
+                <div class="go-score-main">
+                    <div class="go-score-num" id="final-score">0</div>
+                    <div class="go-score-lbl">điểm</div>
+                </div>
+                <div class="go-stats-grid">
+                    <div class="go-stat"><span id="go-distance">0</span><small>Quãng đường</small></div>
+                    <div class="go-stat"><span id="go-coins">0</span><small>Xu thu thập</small></div>
+                    <div class="go-stat"><span id="go-correct">0</span><small>Câu đúng</small></div>
+                    <div class="go-stat"><span id="go-max-speed">0</span><small>Tốc độ max</small></div>
+                </div>
+            </div>
+
+            <!-- Leaderboard -->
+            <div class="go-lb-section">
+                <div class="lb-header">Bảng Danh Dự</div>
+                <ul id="leaderboard-list" class="lb-list"></ul>
+            </div>
+
+            <!-- Actions -->
+            <div class="go-actions">
+                <button id="restart-btn" class="btn-start">CHƠI LẠI</button>
+                <button id="btn-menu" class="btn-outline-sm">VỀ MENU</button>
+            </div>
+        </div>
+    </div>
+
+</div><!-- #game-root -->
+
+    <!-- ══════════════════════════════════════════
+         CUSTOM ROOM MODAL
+    ══════════════════════════════════════════ -->
+    <div id="custom-room-screen" class="screen overlay">
+        <div class="pause-card" style="max-width: 500px; text-align: left;">
+            <h2 class="form-title" style="margin-bottom: 8px;">Tạo Phòng Câu Hỏi</h2>
+            <p style="font-size: 0.8rem; color: var(--c-muted); margin-bottom: 12px;">Dán mảng JSON chứa các câu hỏi của bạn. Định dạng: <br><code>[{"q": "Câu hỏi?", "a": ["A","B","C","D"], "correct": 0, "cat": "Toán"}]</code></p>
+            <textarea id="custom-q-input" style="width: 100%; height: 150px; background: var(--c-surface2); color: var(--c-text); border: 1px solid var(--c-border); padding: 10px; font-family: monospace; border-radius: var(--r-sm); margin-bottom: 16px;" placeholder='[{"q": "1+1=?", "a": ["2","3","4","5"], "correct": 0, "cat": "Math"}]'></textarea>
+            <div style="display: flex; gap: 10px;">
+                <button id="btn-save-room" class="btn-start" style="flex:1;">LƯU & SỬ DỤNG</button>
+                <button id="btn-close-room" class="btn-danger" style="flex:1;">ĐÓNG</button>
+            </div>
+            <div id="room-status" style="margin-top: 12px; font-size: 0.8rem; font-weight: bold;"></div>
+        </div>
+    </div>
+
+<!-- Scripts -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="js/audio.js"></script>
+<script src="js/questions.js"></script>
+<script src="js/game.js"></script>
+</body>
+</html>
