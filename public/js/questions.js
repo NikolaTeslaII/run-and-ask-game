@@ -39,14 +39,13 @@ const QUIZ_DATA = [
   {q:"Bài thơ 'Đây thôn Vĩ Dạ' gợi nhớ về vùng đất nào?", a:["Huế","Đà Lạt","Hà Nội","Quảng Nam"], correct:0, cat:"Ngữ văn 11"},
   {q:"Cho hình chóp S.ABCD có đáy ABCD là hình vuông. Đường thẳng nào vuông góc với mặt phẳng (ABCD)?", a:["SA (nếu SA⊥đáy)","SB","SC","SD"], correct:0, cat:"Toán 11"},
   {q:"Con sông dài nhất thế giới là?", a:["Sông Nile","Sông Amazon","Sông Mê Kông","Sông Mississippi"], correct:0, cat:"Thế giới"},
-  {q:"Thủ đô của nước Pháp là?", a:["Paris","London","Berlin","Madrid"], correct:0, cat:"Địa lý"},
-  {q:"Ai là người đầu tiên đặt chân lên Mặt Trăng?", a:["Neil Armstrong","Yuri Gagarin","Buzz Aldrin","Elon Musk"], correct:0, cat:"Lịch sử"},
-  {q:"Công thức của Benzen là?", a:["C6H6","C6H12","C7H8","C2H2"], correct:0, cat:"Hóa học 11"},
-
 ];
 
 let parsedCustomQ = null;
+let aiQuestionsArray = [];
+let isFetchingAI = false;
 
+// Tải câu hỏi tuỳ chỉnh nội bộ
 function loadCustomQuestions() {
     try {
         const customQ = localStorage.getItem('httt_custom_q');
@@ -61,10 +60,56 @@ function loadCustomQuestions() {
     parsedCustomQ = null; // fallback
 }
 
+// Bơm mẻ câu hỏi AI vào trong bộ nhớ ngầm
+async function fetchAIQuestionsBackground() {
+    if (isFetchingAI) return;
+    isFetchingAI = true;
+    try {
+        console.log("Đang tải ngầm AI Questions về nạp đạn cho Game...");
+        const res = await fetch('/api/gen');
+        if (res.ok) {
+            const newQuestions = await res.json();
+            if (Array.isArray(newQuestions) && newQuestions.length > 0) {
+                aiQuestionsArray.push(...newQuestions);
+                console.log(`Đã nạp thành công ${newQuestions.length} câu AI! Tổng đạn AI: ${aiQuestionsArray.length}`);
+            }
+        } else {
+            console.warn("AI Gen API trả về lỗi:", res.status);
+        }
+    } catch (e) {
+        console.error("Lỗi khi fetch AI background:", e);
+    }
+    isFetchingAI = false;
+}
+
 // Gọi khi khởi động hoặc sau khi lưu custom room
 loadCustomQuestions();
 
+// Tự động gọi mẻ đầu tiên sau 3s (cho load xong mượt mà UI)
+setTimeout(() => fetchAIQuestionsBackground(), 3000);
+
+// Sau đó mỗi 45 giây đẻ thêm 15 câu (100 câu nhanh chóng ngập kho)
+setInterval(() => {
+    // Chỉ đẻ nếu ngân hàng AI chưa đạt 100 câu
+    if (aiQuestionsArray.length < 100) {
+        fetchAIQuestionsBackground();
+    }
+}, 45000);
+
 function getRandomQuestion() {
-    const dataSource = parsedCustomQ || QUIZ_DATA;
-    return dataSource[Math.floor(Math.random() * dataSource.length)];
+    // Nếu User có Custom Room, luôn dùng bài tủ của họ
+    if (parsedCustomQ) {
+        return parsedCustomQ[Math.floor(Math.random() * parsedCustomQ.length)];
+    }
+    
+    // Nếu AI đã xoắn xong câu, lấy từ mỏ AI (bốc xong rút dần ra cho mới lạ)
+    if (aiQuestionsArray.length > 0) {
+        // Lấy 1 câu ngẫu nhiên và bứng nó ra khỏi mảng để không lặp lại
+        const aiIdx = Math.floor(Math.random() * aiQuestionsArray.length);
+        const [q] = aiQuestionsArray.splice(aiIdx, 1);
+        return q;
+    }
+
+    // Default fallback (máy không gọi được AI)
+    return QUIZ_DATA[Math.floor(Math.random() * QUIZ_DATA.length)];
 }

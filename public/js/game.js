@@ -124,6 +124,8 @@ function resetGameState(keepMeta = false) {
         // Meta
         playerName: keepMeta ? prevName : (localStorage.getItem('httt_player_name') || ''),
         mode: keepMeta ? prevMode : 1,
+        // Lane management to prevent clipping
+        laneCooldown: [0, 0, 0],
         // Cached refs
         pc: {},
     };
@@ -172,33 +174,28 @@ const GEO = {
     cyl_pole: new THREE.CylinderGeometry(0.1, 0.1, 3, 6),
 };
 
-// ─── Shared Materials ────────────────────────────────────────────
+// ─── Shared Materials (PBR Upgrade) ─────────────────────────────
 const MAT = {
-    coin: new THREE.MeshLambertMaterial({ color: 0xffd700, emissive: 0xffd700, emissiveIntensity: 0.3 }),
-    particle: new THREE.MeshBasicMaterial({ color: 0xffd28f }),
-    track: new THREE.MeshLambertMaterial({ color: 0x252d3a }),
-    lane: new THREE.MeshLambertMaterial({ color: 0x3d4860 }),
-    border: new THREE.MeshLambertMaterial({ color: 0xf0a500 }),
-    sidewalk: new THREE.MeshLambertMaterial({ color: 0x1c2330 }),
+    coin: new THREE.MeshStandardMaterial({ color: 0xffd700, metalness: 0.8, roughness: 0.2, emissive: 0xffa500, emissiveIntensity: 0.5 }),
+    particle: new THREE.MeshBasicMaterial({ color: 0xffd28f, transparent: true }),
+    track: new THREE.MeshStandardMaterial({ color: 0x1a1a1a, roughness: 0.8 }),
+    lane: new THREE.MeshStandardMaterial({ color: 0x222222, roughness: 0.6 }),
+    border: new THREE.MeshStandardMaterial({ color: 0xffcc00, metalness: 0.5, roughness: 0.3 }),
+    sidewalk: new THREE.MeshStandardMaterial({ color: 0x0f0f0f, roughness: 0.9 }),
     building: [
-        new THREE.MeshLambertMaterial({ color: 0x1a2535 }),
-        new THREE.MeshLambertMaterial({ color: 0x172030 }),
-        new THREE.MeshLambertMaterial({ color: 0x1d2a3a }),
-        new THREE.MeshLambertMaterial({ color: 0x111d2c }),
+        new THREE.MeshStandardMaterial({ color: 0x111111, metalness: 0.2, roughness: 0.8 }),
+        new THREE.MeshStandardMaterial({ color: 0x1a1a1a, metalness: 0.3, roughness: 0.7 }),
     ],
-    window: new THREE.MeshLambertMaterial({ color: 0xfff0b0, emissive: 0xffd060, emissiveIntensity: 0.5 }),
-    // Obstacle colors
-    red: new THREE.MeshLambertMaterial({ color: 0xe74c3c }),
-    orange: new THREE.MeshLambertMaterial({ color: 0xe67e22 }),
-    purple: new THREE.MeshLambertMaterial({ color: 0x8e44ad }),
-    grey: new THREE.MeshLambertMaterial({ color: 0x7f8c8d }),
-    darkRed: new THREE.MeshLambertMaterial({ color: 0xb03a2e }),
-    blue: new THREE.MeshLambertMaterial({ color: 0x2980b9 }),
-    green: new THREE.MeshLambertMaterial({ color: 0x27ae60 }),
-    yellow: new THREE.MeshLambertMaterial({ color: 0xf1c40f }),
-    white: new THREE.MeshLambertMaterial({ color: 0xecf0f1 }),
-    metal: new THREE.MeshLambertMaterial({ color: 0x95a5a6 }),
-    dark: new THREE.MeshLambertMaterial({ color: 0x2c3e50 }),
+    window: new THREE.MeshStandardMaterial({ color: 0x66ccff, emissive: 0x3399ff, emissiveIntensity: 1.0 }),
+    // Obstacle Materials
+    red: new THREE.MeshStandardMaterial({ color: 0xd32f2f, roughness: 0.5 }),
+    orange: new THREE.MeshStandardMaterial({ color: 0xf57c00, roughness: 0.4 }),
+    yellow: new THREE.MeshStandardMaterial({ color: 0xfbc02d, roughness: 0.3 }),
+    white: new THREE.MeshStandardMaterial({ color: 0xeeeeee, roughness: 0.9 }),
+    metal: new THREE.MeshStandardMaterial({ color: 0x9e9e9e, metalness: 0.8, roughness: 0.2 }),
+    dark: new THREE.MeshStandardMaterial({ color: 0x212121, roughness: 0.9 }),
+    neonBlue: new THREE.MeshStandardMaterial({ color: 0x00e5ff, emissive: 0x00e5ff, emissiveIntensity: 2 }),
+    neonRed: new THREE.MeshStandardMaterial({ color: 0xff1744, emissive: 0xff1744, emissiveIntensity: 2.5 }),
 };
 
 /**
@@ -211,403 +208,116 @@ const MAT = {
  *   fullBlock: không thể né bằng bất kỳ cách nào (chỉ đổi làn)
  */
 const OBS_BUILDERS = [
-    // ── NEW: Toa Tàu Di Chuyển (Moving Train) ──
+    // 0: STATIC TRAIN (Subway classic) - Long, can jump on roof
     {
-        lbl: 'Tàu Di Chuyển',
-        slideBottom: 0,
-        jumpTop: 99, 
-        fullBlock: false,
+        lbl: 'Static Train',
+        hitbox: { dx: 1.0, dy: 2.2, dz: 6.0, yOff: 1.1 },
         isPlatform: true,
-        roofHeight: 2.3, // Can jump onto the roof
-        length: 12.0,
-        moveSpeed: 25, // Moves towards player
-        build() {
-            const g = new THREE.Group();
-            
-            // Thân chính (Train Body) 
-            // Màu xanh dương đẹp mắt
-            const bodyMat = new THREE.MeshLambertMaterial({ color: 0x1e88e5 });
-            const body = new THREE.Mesh(new THREE.BoxGeometry(2.1, 2.4, 12), bodyMat);
-            body.position.y = 1.2; g.add(body);
-            
-            // Kính chắn gió trước
-            const glassMat = new THREE.MeshLambertMaterial({ color: 0x111122, emissive: 0x050510 });
-            const glass = new THREE.Mesh(new THREE.PlaneGeometry(1.9, 1.2), glassMat);
-            glass.position.set(0, 1.4, -6.01); 
-            glass.rotation.y = Math.PI; 
-            g.add(glass);
-            
-            // Kính bên sườn
-            [-1.06, 1.06].forEach(x => {
-                for(let i=0; i<4; i++) {
-                    const win = new THREE.Mesh(new THREE.PlaneGeometry(1.6, 0.8), glassMat);
-                    win.position.set(x, 1.4, -3.5 + i*2.3);
-                    win.rotation.y = x > 0 ? Math.PI/2 : -Math.PI/2;
-                    g.add(win);
-                }
-            });
-            
-            // Đèn pha trước
-            const headlightMat = new THREE.MeshLambertMaterial({ color: 0xffffff, emissive: 0xfff0b0, emissiveIntensity: 1.5 });
-            [-0.7, 0.7].forEach(x => {
-                const hl = new THREE.Mesh(new THREE.CircleGeometry(0.2, 16), headlightMat);
-                hl.position.set(x, 0.6, -6.02);
-                hl.rotation.y = Math.PI;
-                g.add(hl);
-            });
-            
-            // Bánh tàu
-            const wheelMat = new THREE.MeshLambertMaterial({ color: 0x222222 });
-            [-0.8, 0.8].forEach(x => {
-                [-4, -2, 2, 4].forEach(z => {
-                    const w = new THREE.Mesh(new THREE.CylinderGeometry(0.3, 0.3, 0.2, 12), wheelMat);
-                    w.rotation.z = Math.PI/2;
-                    w.position.set(x, 0.3, z);
-                    g.add(w);
-                });
-            });
-
-            return g;
-        }
-    },
-
-    // ── NEW: Toa Tàu Đứng Yên (Static Train) ──
-    {
-        lbl: 'Tàu Đứng Yên',
-        slideBottom: 0,
-        jumpTop: 99, 
-        fullBlock: false,
-        isPlatform: true,
-        roofHeight: 2.3, // Can jump onto the roof
+        roofHeight: 2.3,
         length: 12.0,
         moveSpeed: 0,
+        laneBlock: 4.5, // Stop spawning in this lane for 4.5s
         build() {
             const g = new THREE.Group();
-            
-            // Thân chính (Train Body) 
-            const bodyMat = new THREE.MeshLambertMaterial({ color: 0xe53935 }); // Đỏ
-            const body = new THREE.Mesh(new THREE.BoxGeometry(2.1, 2.4, 12), bodyMat);
-            body.position.y = 1.2; g.add(body);
-            
-            // Kính chắn gió trước
-            const glassMat = new THREE.MeshLambertMaterial({ color: 0x111122 });
-            const glass = new THREE.Mesh(new THREE.PlaneGeometry(1.9, 1.2), glassMat);
-            glass.position.set(0, 1.4, -6.01); 
-            glass.rotation.y = Math.PI; 
-            g.add(glass);
-            
-            // Kính bên sườn
-            [-1.06, 1.06].forEach(x => {
-                for(let i=0; i<4; i++) {
-                    const win = new THREE.Mesh(new THREE.PlaneGeometry(1.6, 0.8), glassMat);
-                    win.position.set(x, 1.4, -3.5 + i*2.3);
-                    win.rotation.y = x > 0 ? Math.PI/2 : -Math.PI/2;
-                    g.add(win);
+            // Main body
+            const body = new THREE.Mesh(new THREE.BoxGeometry(2.1, 2.3, 11.5), MAT.dark);
+            body.position.y = 1.25; g.add(body);
+            // Front window (Cyber blue)
+            const win = new THREE.Mesh(new THREE.BoxGeometry(1.9, 1.0, 0.1), MAT.window);
+            win.position.set(0, 1.5, -5.76); g.add(win);
+            // Side detailing (Iron Panels)
+            for(let i=-4.5; i<=4.5; i+=2.25) {
+                const s = new THREE.Mesh(new THREE.BoxGeometry(2.15, 1.4, 0.9), MAT.metal);
+                s.position.set(0, 1.2, i); g.add(s);
+            }
+            // Roof lights
+            for(let i=-5; i<=5; i+=2.5) {
+                const l = new THREE.Mesh(new THREE.BoxGeometry(0.8, 0.1, 0.8), MAT.neonBlue);
+                l.position.set(0, 2.41, i); g.add(l);
+            }
+            // Wheels
+            const wheelGeo = new THREE.CylinderGeometry(0.35, 0.35, 0.4, 12);
+            for(let x of [-0.9, 0.9]) {
+                for(let z of [-4, 4]) {
+                    const w = new THREE.Mesh(wheelGeo, MAT.dark);
+                    w.rotation.z = Math.PI/2;
+                    w.position.set(x, 0.35, z); g.add(w);
                 }
-            });
-            
+            }
             return g;
         }
     },
-
-    // ── 0: Rào cản tiêu chuẩn (Standard Barrier) ── nhảy qua được
+    // 1: BARRICADE (Subway classic) - Stripe patterns
     {
-        lbl: 'Rào Cản',
-        slideBottom: 0,     // Từ mặt đất → phải nhảy, không slide qua
-        jumpTop: 1.4,    // Nhảy qua nếu player.y > 1.4
-        fullBlock: false,
+        lbl: 'Barricade',
+        hitbox: { dx: 1.0, dy: 1.3, dz: 0.3, yOff: 0.65 },
+        jumpTop: 1.4,
         build() {
             const g = new THREE.Group();
-            // Thân chính
-            const body = new THREE.Mesh(new THREE.BoxGeometry(2.0, 1.2, 0.4), MAT.red);
-            body.position.y = 0.6; g.add(body);
-            // Sọc trắng phản quang
-            const stripe = new THREE.Mesh(new THREE.BoxGeometry(2.0, 0.15, 0.42), MAT.white);
-            stripe.position.y = 0.7; g.add(stripe);
-            // Hai chân đỡ
-            [-0.7, 0.7].forEach(x => {
-                const leg = new THREE.Mesh(new THREE.BoxGeometry(0.25, 0.35, 0.3), MAT.dark);
-                leg.position.set(x, 0.17, 0); g.add(leg);
-            });
-            return g;
-        }
-    },
-
-    // ── 1: Cổng Vòm (Arch Gate) ── chỉ slide dưới, không nhảy qua
-    {
-        lbl: 'Cổng Vòm',
-        slideBottom: 1.1,   // Thanh ngang ở y=2.1, tức bottom=1.1 → slide (top=0.95) qua được!
-        jumpTop: 99,     // Không thể nhảy qua (quá cao)
-        fullBlock: false,   // slide qua được
-        build() {
-            const g = new THREE.Group();
-            // Cột trái
-            const pL = new THREE.Mesh(new THREE.BoxGeometry(0.35, 2.4, 0.35), MAT.metal);
-            pL.position.set(-1.6, 1.2, 0); g.add(pL);
-            // Cột phải
-            const pR = pL.clone();
-            pR.position.set(1.6, 1.2, 0); g.add(pR);
-            // Thanh ngang (ở y=2.1 → bottom=1.95 → slide dễ)
-            const bar = new THREE.Mesh(new THREE.BoxGeometry(3.55, 0.3, 0.35), MAT.red);
-            bar.position.y = 2.25; g.add(bar);
-            // Đèn cảnh báo trên thanh
-            [-1.4, 0, 1.4].forEach(x => {
-                const lamp = new THREE.Mesh(new THREE.BoxGeometry(0.25, 0.25, 0.1), MAT.yellow);
-                lamp.position.set(x, 2.42, 0.2); g.add(lamp);
+            // Horizontal rails
+            const rail1 = new THREE.Mesh(new THREE.BoxGeometry(2.2, 0.25, 0.25), MAT.orange);
+            rail1.position.y = 0.6; g.add(rail1);
+            const rail2 = rail1.clone();
+            rail2.position.y = 1.2; g.add(rail2);
+            // Stripe decals
+            for(let x=-0.8; x<=0.8; x+=0.4) {
+                const s = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.85, 0.28), MAT.white);
+                s.position.set(x, 0.9, 0); g.add(s);
+            }
+            // Vertical legs
+            [-0.9, 0.9].forEach(x => {
+                const p = new THREE.Mesh(new THREE.BoxGeometry(0.25, 1.4, 0.3), MAT.metal);
+                p.position.set(x, 0.7, 0); g.add(p);
+                // Footer
+                const f = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.15, 0.5), MAT.dark);
+                f.position.set(x, 0.08, 0); g.add(f);
             });
             return g;
         }
     },
-
-    // ── 2: Thanh Ngang Lơ Lửng (Floating Bar) ── BẮT BUỘC phải slide
+    // 2: ARCHWAY (Subway classic) - Neon signage
     {
-        lbl: 'Thanh Lơ Lửng',
-        slideBottom: 1.05,  // Đáy ở y=1.05 → player slide (top=0.95) lọt qua!
-        jumpTop: 99,
-        fullBlock: false,
+        lbl: 'Archway',
+        hitbox: { dx: 1.1, dy: 0.6, dz: 0.3, yOff: 2.1 },
+        slideBottom: 1.8,
         build() {
             const g = new THREE.Group();
-            // Thanh chính
-            const beam = new THREE.Mesh(new THREE.BoxGeometry(3.0, 0.32, 0.55), MAT.orange);
-            beam.position.y = 1.5; g.add(beam);
-            // Dây treo từ trên (trang trí)
-            [-1.2, 0, 1.2].forEach(x => {
-                const rope = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.8, 0.06), MAT.dark);
-                rope.position.set(x, 2.1, 0); g.add(rope);
-            });
-            // Mũi nhọn cảnh báo phía dưới
-            [[-0.9, 1.16], [0, 1.16], [0.9, 1.16]].forEach(([x, y]) => {
-                const spike = new THREE.Mesh(new THREE.ConeGeometry(0.1, 0.22, 4), MAT.red);
-                spike.position.set(x, y, 0);
-                spike.rotation.z = Math.PI; g.add(spike);
-            });
+            // Pillars
+            const pill = new THREE.Mesh(new THREE.BoxGeometry(0.4, 2.8, 0.4), MAT.metal);
+            pill.position.set(-1.6, 1.4, 0); g.add(pill);
+            const pillR = pill.clone();
+            pillR.position.set(1.6, 1.4, 0); g.add(pillR);
+            // Top Arch
+            const arch = new THREE.Mesh(new THREE.BoxGeometry(3.6, 0.6, 0.6), MAT.red);
+            arch.position.y = 2.4; g.add(arch);
+            // Neon Sign "DANGER"
+            const sign = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.8, 0.1), MAT.neonRed);
+            sign.position.set(0, 2.4, 0.31); g.add(sign);
             return g;
         }
     },
-
-    // ── 3: Xe Cảnh Sát Lật Ngang (Police Blockade) ── nhảy qua
+    // 3: MAINTENANCE TRUCK (Complex geometry)
     {
-        lbl: 'Xe Chặn Đường',
-        slideBottom: 0,
-        jumpTop: 1.0,
-        fullBlock: false,
+        lbl: 'Work Truck',
+        hitbox: { dx: 1.0, dy: 1.8, dz: 3.0, yOff: 0.9 },
+        isPlatform: true,
+        roofHeight: 1.9,
+        length: 6.5,
+        laneBlock: 3.5,
         build() {
             const g = new THREE.Group();
-            // Thân xe
-            const chassis = new THREE.Mesh(new THREE.BoxGeometry(2.2, 0.5, 1.0), MAT.blue);
-            chassis.position.y = 0.25; g.add(chassis);
             // Cabin
-            const cabin = new THREE.Mesh(new THREE.BoxGeometry(1.4, 0.55, 0.95), MAT.blue);
-            cabin.position.y = 0.78; g.add(cabin);
-            // Đèn nóc
-            const light = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.15, 0.2), MAT.red);
-            light.position.y = 1.1; g.add(light);
-            // Bánh xe
-            [[-0.7, -0.4], [0.7, -0.4], [-0.7, 0.4], [0.7, 0.4]].forEach(([x, z]) => {
-                const wheel = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.22, 0.18, 8), MAT.dark);
-                wheel.rotation.z = Math.PI / 2;
-                wheel.position.set(x, 0.22, z); g.add(wheel);
-            });
-            // Biển Stop
-            const sign = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.35, 0.05), MAT.white);
-            sign.position.set(0, 1.2, 0.53); g.add(sign);
-            return g;
-        }
-    },
-
-    // ── 4: Đống Thùng Cao (Crate Stack) ── phải nhảy
-    {
-        lbl: 'Thùng Hàng',
-        slideBottom: 0,
-        jumpTop: 1.8,
-        fullBlock: false,
-        build() {
-            const g = new THREE.Group();
-            // Thùng dưới (lớn)
-            const b1 = new THREE.Mesh(new THREE.BoxGeometry(1.8, 1.0, 1.0), MAT.purple);
-            b1.position.y = 0.5; g.add(b1);
-            // Thùng giữa
-            const b2 = new THREE.Mesh(new THREE.BoxGeometry(1.5, 0.9, 0.95), MAT.darkRed);
-            b2.position.y = 1.45; g.add(b2);
-            // Thùng nhỏ trên cùng
-            const b3 = new THREE.Mesh(new THREE.BoxGeometry(1.1, 0.7, 0.8), MAT.purple);
-            b3.position.y = 2.25; g.add(b3);
-            // Nẹp kim loại
-            [-0.5, 0.5].forEach(y => {
-                const strap = new THREE.Mesh(new THREE.BoxGeometry(1.85, 0.08, 1.02), MAT.metal);
-                strap.position.set(0, y + 0.35, 0); g.add(strap);
-            });
-            return g;
-        }
-    },
-
-    // ── 5: Hố Nước (Ground Burst) ── phải nhảy hoặc lách sang làn khác
-    {
-        lbl: 'Vật Cản Thấp',
-        slideBottom: 0,
-        jumpTop: 0.7,    // Nhảy thấp là qua
-        fullBlock: false,
-        build() {
-            const g = new THREE.Group();
-            // Khối đá vỡ
-            [[-0.5, 0.3, 0], [0, 0.4, 0.2], [0.55, 0.25, -0.2], [-0.3, 0.2, -0.3]].forEach(([x, h, z]) => {
-                const rock = new THREE.Mesh(
-                    new THREE.BoxGeometry(0.55 + Math.random() * 0.4, h * 1.2, 0.55),
-                    MAT.grey
-                );
-                rock.position.set(x, h / 2, z);
-                rock.rotation.y = x * 0.8;
-                g.add(rock);
-            });
-            // Mũi nhọn lên
-            const spike = new THREE.Mesh(new THREE.ConeGeometry(0.18, 0.55, 4), MAT.darkRed);
-            spike.position.set(0, 0.55, 0); g.add(spike);
-            return g;
-        }
-    },
-
-    // ── 6: Laser Ngang (Laser Beam) ── kết hợp cả nhảy lẫn slide
-    //     Laser dưới thấp (phải nhảy qua) + Laser trên (phải slide nếu không kịp nhảy)
-    {
-        lbl: 'Tia Laser',
-        slideBottom: 1.0,  // Cổng trên: có thể slide qua phần trên
-        jumpTop: 0.65,  // Tia dưới: nhảy qua
-        fullBlock: false,
-        build() {
-            const g = new THREE.Group();
-            // Generator trái & phải
-            [-1.5, 1.5].forEach(x => {
-                const gen = new THREE.Mesh(new THREE.BoxGeometry(0.4, 2.8, 0.4), MAT.dark);
-                gen.position.set(x, 1.4, 0); g.add(gen);
-                // Đèn trên generator
-                const glow = new THREE.Mesh(new THREE.SphereGeometry(0.2, 6, 5), MAT.green);
-                glow.position.set(x, 2.82, 0); g.add(glow);
-            });
-            // Tia laser dưới (ở y=0.45) — phải nhảy qua
-            const laserLow = new THREE.Mesh(new THREE.BoxGeometry(2.6, 0.1, 0.1), MAT.green);
-            laserLow.position.y = 0.45; g.add(laserLow);
-            // Tia laser trên (ở y=1.55) — đứng phải cúi/slide qua
-            const laserHigh = new THREE.Mesh(new THREE.BoxGeometry(2.6, 0.1, 0.1), MAT.red);
-            laserHigh.position.y = 1.55; g.add(laserHigh);
-            return g;
-        }
-    },
-
-    // ── 7: Barrel Lăn Khổng Lồ (Giant Rolling Barrel)
-    {
-        lbl: 'Thùng Phi',
-        slideBottom: 0,
-        jumpTop: 1.1,
-        fullBlock: false,
-        build() {
-            const g = new THREE.Group();
-            const body = new THREE.Mesh(new THREE.CylinderGeometry(1.0, 1.0, 1.8, 10), MAT.orange);
-            body.rotation.x = Math.PI / 2;  // Lăn theo trục Z
-            body.position.y = 1.0; g.add(body);
-            // Đai thùng
-            [-0.5, 0, 0.5].forEach(z => {
-                const ring = new THREE.Mesh(new THREE.TorusGeometry(1.0, 0.09, 6, 12), MAT.dark);
-                ring.rotation.x = Math.PI / 2;
-                ring.position.set(0, 1.0, z); g.add(ring);
-            });
-            g.userData.spin = false; 
-            return g;
-        }
-    },
-
-    // ── 8: Tường Gạch Đặc (Solid Brick Wall) ── Chặn đặc 1 làn
-    {
-        lbl: 'Tường Gạch',
-        slideBottom: 0,
-        jumpTop: 99,
-        fullBlock: true,
-        build() {
-            const g = new THREE.Group();
-            const wall = new THREE.Mesh(new THREE.BoxGeometry(2.2, 3.5, 0.8), MAT.darkRed);
-            wall.position.y = 1.75; g.add(wall);
-            // Cột viền
-            [-1.15, 1.15].forEach(x => {
-                const col = new THREE.Mesh(new THREE.BoxGeometry(0.3, 3.8, 1.0), MAT.metal);
-                col.position.set(x, 1.9, 0); g.add(col);
-                // Đèn nháy trên đỉnh
-                const light = new THREE.Mesh(new THREE.SphereGeometry(0.2, 8, 8), MAT.yellow);
-                light.position.set(x, 3.9, 0); g.add(light);
-            });
-            // Biển cảnh báo
-            const sign = new THREE.Mesh(new THREE.PlaneGeometry(1.2, 1.2), MAT.yellow);
-            sign.position.set(0, 2.0, 0.41); g.add(sign);
-            const danger = new THREE.Mesh(new THREE.PlaneGeometry(0.8, 0.8), MAT.red);
-            danger.position.set(0, 2.0, 0.42); g.add(danger);
-            return g;
-        }
-    },
-    // ── 9: Drone Tuần Tra (Patrol Drone) ── Phải slide (overhead block)
-    {
-        lbl: 'Drone',
-        slideBottom: 1.2,
-        jumpTop: 99,
-        fullBlock: false,
-        build() {
-            const g = new THREE.Group();
-            const body = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.4, 1.2), MAT.dark);
-            body.position.y = 2.4; g.add(body);
-            // Cánh quạt
-            [[-0.6, -0.6], [0.6, -0.6], [-0.6, 0.6], [0.6, 0.6]].forEach(([x, z]) => {
-                const prop = new THREE.Mesh(new THREE.BoxGeometry(0.8, 0.05, 0.1), MAT.metal);
-                prop.position.set(x, 2.6, z);
-                prop.name = 'prop';
-                g.add(prop);
-            });
-            // Đèn quét laser
-            const light = new THREE.Mesh(new THREE.ConeGeometry(0.5, 2.4, 8), new THREE.MeshBasicMaterial({ color: 0xff0000, transparent: true, opacity: 0.2 }));
-            light.position.y = 1.2; light.rotation.x = Math.PI; g.add(light);
-            return g;
-        }
-    },
-    // ── 10: Tường Chặn Ba (Triple Grid) ── Có khe hở ở giữa (nhảy) hoặc 2 bên (slide)
-    {
-        lbl: 'Lưới Điện',
-        slideBottom: 0,
-        jumpTop: 1.5,
-        fullBlock: false,
-        build() {
-            const g = new THREE.Group();
-            const frame = new THREE.Mesh(new THREE.BoxGeometry(2.2, 2.5, 0.2), MAT.metal);
-            frame.position.y = 1.25; g.add(frame);
-            const panel = new THREE.Mesh(new THREE.BoxGeometry(2.0, 2.0, 0.1), new THREE.MeshLambertMaterial({ color: 0x00ffff, emissive: 0x00ffff, emissiveIntensity: 0.5, transparent: true, opacity: 0.4 }));
-            panel.position.y = 1.25; g.add(panel);
-            return g;
-        }
-    },
-    // ── 11: Xe Công Trình (Construction Truck) ── Nhảy qua cabin hoặc lách
-    {
-        lbl: 'Xe Tải',
-        slideBottom: 0,
-        jumpTop: 2.2,
-        fullBlock: false,
-        build() {
-            const g = new THREE.Group();
-            const cab = new THREE.Mesh(new THREE.BoxGeometry(1.8, 1.5, 2.0), MAT.yellow);
-            cab.position.y = 0.75; g.add(cab);
-            const bed = new THREE.Mesh(new THREE.BoxGeometry(2.0, 1.2, 3.5), MAT.grey);
-            bed.position.set(0, 0.6, -2.8); g.add(bed);
-            return g;
-        }
-    },
-    // ── 12: Robot Cản Đường (Blocker Bot) ── Thủ thế, chiếm diện tích rộng
-    {
-        lbl: 'Robot Chặn',
-        slideBottom: 0,
-        jumpTop: 99,
-        fullBlock: true,
-        build() {
-            const g = new THREE.Group();
-            const torso = new THREE.Mesh(new THREE.BoxGeometry(1.5, 1.8, 1.0), MAT.metal);
-            torso.position.y = 1.2; g.add(torso);
-            const head = new THREE.Mesh(new THREE.BoxGeometry(0.8, 0.6, 0.8), MAT.red);
-            head.position.y = 2.4; g.add(head);
-            const arms = new THREE.Mesh(new THREE.BoxGeometry(3.0, 0.4, 0.4), MAT.metal);
-            arms.position.y = 1.8; g.add(arms);
+            const cab = new THREE.Mesh(new THREE.BoxGeometry(1.9, 1.4, 2.0), MAT.yellow);
+            cab.position.y = 1.2; g.add(cab);
+            // Windows
+            const w = new THREE.Mesh(new THREE.BoxGeometry(1.7, 0.7, 0.1), MAT.window);
+            w.position.set(0, 1.4, -1.01); g.add(w);
+            // Flatbed
+            const bed = new THREE.Mesh(new THREE.BoxGeometry(2.1, 0.8, 4.5), MAT.metal);
+            bed.position.set(0, 0.4, 3.0); g.add(bed);
+            // Safety lights
+            const l = new THREE.Mesh(new THREE.SphereGeometry(0.2, 8, 8), MAT.neonBlue);
+            l.position.set(0, 1.95, 0); g.add(l);
             return g;
         }
     }
@@ -690,78 +400,76 @@ async function buildWorldAsync() {
 // ═══════════════════════════════════════════
 function buildPlayer() {
     playerGroup = new THREE.Group();
-    playerMat = new THREE.MeshLambertMaterial({ color: 0x3498db });
-    playerAccentMat = new THREE.MeshLambertMaterial({ color: 0xf0a500 });
-    const darkMat = new THREE.MeshLambertMaterial({ color: 0x1a252f });
-    const skinMat = new THREE.MeshLambertMaterial({ color: 0xf5cba7 });
+    // Use PBR materials for the player too
+    playerMat = new THREE.MeshStandardMaterial({ color: 0x3498db, metalness: 0.2, roughness: 0.5 });
+    playerAccentMat = new THREE.MeshStandardMaterial({ color: 0xffcc00, metalness: 0.4, roughness: 0.3 });
+    const darkMat = new THREE.MeshStandardMaterial({ color: 0x1a1a1a, roughness: 0.8 });
+    const skinMat = new THREE.MeshStandardMaterial({ color: 0xffdbac, roughness: 0.6 });
+    const hairMat = new THREE.MeshStandardMaterial({ color: 0x4e342e });
 
-    // IMPORTANT: Hướng nhân vật về phía -Z (phướng chạy)
-    // Mặt trước (visor, mắt) ở mặt Z âm sẽ hướng về phía trước
-    // playerGroup.rotation.y = Math.PI → quay 180° để mặt đối camera nhìn vào lưng
-
-    // Torso
-    const torso = new THREE.Mesh(new THREE.BoxGeometry(0.85, 1.05, 0.5), playerMat);
+    // 1. Torso (Hoodie style)
+    const torso = new THREE.Mesh(new THREE.BoxGeometry(0.9, 1.1, 0.6), playerMat);
     torso.position.y = 0.65; torso.name = 'torso'; playerGroup.add(torso);
+    
+    // Hoodie front pocket
+    const pocket = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.3, 0.1), playerMat);
+    pocket.position.set(0, 0.45, -0.31); playerGroup.add(pocket);
 
-    // Mạng lưới áo
-    const strip = new THREE.Mesh(new THREE.BoxGeometry(0.3, 1.0, 0.52), playerAccentMat);
-    strip.position.set(0, 0.65, 0); playerGroup.add(strip);
+    // 2. Head & Hair
+    const head = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.65, 0.6), skinMat);
+    head.position.y = 1.5; head.name = 'head'; playerGroup.add(head);
 
-    // Đầu
-    const head = new THREE.Mesh(new THREE.BoxGeometry(0.65, 0.6, 0.58), skinMat);
-    head.position.y = 1.48; head.name = 'head'; playerGroup.add(head);
+    // Tóc / Hair (Subway style messy hair)
+    const hair = new THREE.Mesh(new THREE.BoxGeometry(0.72, 0.3, 0.62), hairMat);
+    hair.position.y = 1.85; playerGroup.add(hair);
 
-    // Mũ bảo hiểm
-    const cap = new THREE.Mesh(new THREE.BoxGeometry(0.7, 0.28, 0.62), playerAccentMat);
-    cap.position.set(0, 1.76, 0); playerGroup.add(cap);
-    // Lưỡi mũ nhô ra phía trước → -Z (vì group sẽ quay)
-    const brim = new THREE.Mesh(new THREE.BoxGeometry(0.82, 0.07, 0.38), playerAccentMat);
-    brim.position.set(0, 1.63, -0.2); playerGroup.add(brim);
+    // Mũ Lưỡi Trai (Cap) - Vibrant yellow
+    const cap = new THREE.Mesh(new THREE.BoxGeometry(0.74, 0.25, 0.64), playerAccentMat);
+    cap.position.set(0, 1.95, 0); playerGroup.add(cap);
+    const brim = new THREE.Mesh(new THREE.BoxGeometry(0.85, 0.08, 0.45), playerAccentMat);
+    brim.position.set(0, 1.85, -0.25); playerGroup.add(brim);
 
-    // Mắt (nhìn về -Z)
-    const eyeMat = new THREE.MeshLambertMaterial({ color: 0x1a1a2e });
-    const eyeWhiteMat = new THREE.MeshLambertMaterial({ color: 0xffffff });
-    [-0.16, 0.16].forEach(ex => {
-        const eyeWhite = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.15, 0.06), eyeWhiteMat);
-        eyeWhite.position.set(ex, 1.5, -0.31); playerGroup.add(eyeWhite);
-        const pupil = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.1, 0.06), eyeMat);
-        pupil.position.set(ex, 1.5, -0.34); playerGroup.add(pupil);
+    // 3. Eyes (Anime/Expressive style)
+    const eyeWhiteMat = new THREE.MeshStandardMaterial({ color: 0xffffff });
+    const eyePupilMat = new THREE.MeshStandardMaterial({ color: 0x212121 });
+    [-0.18, 0.18].forEach(x => {
+        const ew = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.18, 0.05), eyeWhiteMat);
+        ew.position.set(x, 1.52, -0.31); playerGroup.add(ew);
+        const ep = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.12, 0.06), eyePupilMat);
+        ep.position.set(x, 1.52, -0.34); playerGroup.add(ep);
     });
 
-    // Cánh tay
-    const armGeo = new THREE.BoxGeometry(0.28, 0.85, 0.3);
-    [-0.58, 0.58].forEach((ax, i) => {
+    // 4. Arms (With sleeves and hands)
+    const armGeo = new THREE.BoxGeometry(0.3, 0.85, 0.3);
+    const handGeo = new THREE.SphereGeometry(0.18, 8, 8);
+    [-0.6, 0.6].forEach((x, i) => {
         const arm = new THREE.Mesh(armGeo, playerMat);
-        arm.position.set(ax, 0.6, 0);
+        arm.position.set(x, 0.65, 0);
         arm.name = `arm${i}`; playerGroup.add(arm);
+        const hand = new THREE.Mesh(handGeo, skinMat);
+        hand.position.set(x, 0.2, 0); playerGroup.add(hand);
     });
 
-    // Chân
-    const legGeo = new THREE.BoxGeometry(0.36, 0.85, 0.36);
-    [[-0.22, 'legL'], [0.22, 'legR']].forEach(([lx, nm]) => {
+    // 5. Legs (Jeans/Streetwear style)
+    const legGeo = new THREE.BoxGeometry(0.38, 0.9, 0.38);
+    [[-0.24, 'legL'], [0.24, 'legR']].forEach(([x, nm]) => {
         const leg = new THREE.Mesh(legGeo, darkMat);
-        leg.position.set(lx, -0.25, 0);
+        leg.position.set(x, -0.25, 0);
         leg.name = nm; playerGroup.add(leg);
     });
 
-    // Giày
-    const shoeGeo = new THREE.BoxGeometry(0.38, 0.22, 0.52);
-    [[-0.22, 'shoeL'], [0.22, 'shoeR']].forEach(([sx, nm]) => {
+    // Shoes (Sneakers)
+    const shoeGeo = new THREE.BoxGeometry(0.42, 0.25, 0.6);
+    [[-0.24, 'shoeL'], [0.24, 'shoeR']].forEach(([x, nm]) => {
         const shoe = new THREE.Mesh(shoeGeo, playerAccentMat);
-        // Giày nhô ra phía trước (-Z)
-        shoe.position.set(sx, -0.73, -0.07);
-        shoe.name = nm; playerGroup.add(shoe);
+        shoe.position.set(x, -0.75, -0.1); playerGroup.add(shoe);
     });
 
-    // Ba lô (ở phía sau: +Z)
-    const pack = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.65, 0.22), playerAccentMat);
-    pack.position.set(0, 0.65, 0.36); playerGroup.add(pack);
-    // Dây đeo ba lô
-    const strapMat = new THREE.MeshLambertMaterial({ color: 0x2c3e50 });
-    [-0.2, 0.2].forEach(sx => {
-        const strap = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.7, 0.05), strapMat);
-        strap.position.set(sx, 0.7, 0.28); playerGroup.add(strap);
-    });
+    // 6. Backpack (Subway Surfers essential)
+    const pack = new THREE.Mesh(new THREE.BoxGeometry(0.65, 0.8, 0.3), playerAccentMat);
+    pack.position.set(0, 0.65, 0.41); playerGroup.add(pack);
+    const zipper = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.05, 0.32), darkMat);
+    zipper.position.set(0, 0.8, 0.42); playerGroup.add(zipper);
 
     playerGroup.position.set(C.LANES[1], C.PLAYER_Y, 0);
 
@@ -978,28 +686,51 @@ function getPooled(pool) {
 // 9. SPAWN LOGIC
 // ═══════════════════════════════════════════
 function spawnObstacle() {
-    const isDual = Math.random() < 0.35; // 35% chance cho 2 chướng ngại
-    
-    function spawnSingle(lane) {
-        const bIdx = Math.floor(Math.random() * OBS_BUILDERS.length);
-        const mesh = obstaclePool.find(m => !m.userData.active && m.userData.builderIdx === bIdx);
-        if (!mesh) return;
+    // 1. Choose a lane that isn't on cooldown
+    const availableLanes = [0, 1, 2].filter(l => G.laneCooldown[l] <= 0);
+    if (availableLanes.length === 0) return;
+    const lane = availableLanes[Math.floor(Math.random() * availableLanes.length)];
 
-        mesh.userData.active = true;
-        mesh.userData.laneIdx = lane;
-        mesh.position.set(C.LANES[lane], 0, C.SPAWN_Z);
-        mesh.rotation.y = 0;
-        mesh.visible = true;
-        activeObstacles.push(mesh);
+    // 2. Choose a builder
+    const bIdx = Math.floor(Math.random() * OBS_BUILDERS.length);
+    const data = OBS_BUILDERS[bIdx];
+    
+    // 3. Get from pool
+    const mesh = obstaclePool.find(m => !m.userData.active && m.userData.builderIdx === bIdx);
+    if (!mesh) return;
+
+    // 4. Setup
+    mesh.userData.active = true;
+    mesh.userData.laneIdx = lane;
+    mesh.userData.typeData = data; // Ensure fresh ref
+    mesh.position.set(C.LANES[lane], 0, C.SPAWN_Z);
+    mesh.rotation.y = 0;
+    mesh.visible = true;
+    activeObstacles.push(mesh);
+
+    // 5. Apply lane block if specified (prevents clipping behind long objects)
+    if (data.laneBlock) {
+        G.laneCooldown[lane] = data.laneBlock;
     }
 
-    const lane1 = Math.floor(Math.random() * 3);
-    spawnSingle(lane1);
-
-    if (isDual) {
-        let lane2 = Math.floor(Math.random() * 3);
-        while (lane2 === lane1) lane2 = Math.floor(Math.random() * 3);
-        spawnSingle(lane2);
+    // ── Chance of dual obstacles if no lane is on high cooldown ──
+    const diff = (G.speed - C.SPEED_START) / (C.SPEED_MAX - C.SPEED_START);
+    if (Math.random() < 0.15 + diff * 0.3) {
+        const remainingLanes = availableLanes.filter(l => l !== lane);
+        if (remainingLanes.length > 0) {
+            const lane2 = remainingLanes[Math.floor(Math.random() * remainingLanes.length)];
+            const bIdx2 = Math.floor(Math.random() * OBS_BUILDERS.length);
+            const m2 = obstaclePool.find(m => !m.userData.active && m.userData.builderIdx === bIdx2);
+            if (m2) {
+                m2.userData.active = true;
+                m2.userData.laneIdx = lane2;
+                m2.userData.typeData = OBS_BUILDERS[bIdx2];
+                m2.position.set(C.LANES[lane2], 0, C.SPAWN_Z);
+                m2.visible = true;
+                activeObstacles.push(m2);
+                if (OBS_BUILDERS[bIdx2].laneBlock) G.laneCooldown[lane2] = OBS_BUILDERS[bIdx2].laneBlock;
+            }
+        }
     }
 }
 
@@ -1102,6 +833,11 @@ function gameLoop(nowMs) {
 }
 
 function updateGame(dt, now) {
+    // ── Lane Cooldowns ──
+    for(let i=0; i<3; i++) {
+        if (G.laneCooldown[i] > 0) G.laneCooldown[i] -= dt;
+    }
+
     // ── Speed & Score ──
     G.speed = Math.min(G.speed + C.SPEED_ACCEL * dt, C.SPEED_MAX);
     G.dist += G.speed * dt;
@@ -1235,30 +971,44 @@ function updateGame(dt, now) {
             continue;
         }
 
-        // ── COLLISION ──
+        // ── COLLISION (Precision AABB) ──
         if (!G.invincible) {
             const t = obs.userData.typeData;
             
-            // If player is safely on top of this platform, skip crash
+            // 1. Safe on platform check
             if (t.isPlatform && playerGroup.position.y >= C.PLAYER_Y + t.roofHeight - 0.2) {
                 continue;
             }
 
-            const dz = Math.abs(obs.position.z - playerGroup.position.z);
-            const dx = Math.abs(obs.position.x - playerGroup.position.x);
-            
-            // Train/Long obstacles have bigger Z hitbox
-            const hitDz = t.length ? (t.length / 2 + 0.45) : 1.1;
+            // 2. AABB Box Overlap
+            const box = t.hitbox || { dx: 1.1, dy: 1.2, dz: 1.0, yOff: 0.6 };
+            const pX = playerGroup.position.x;
+            const pY = playerGroup.position.y;
+            const pZ = playerGroup.position.z;
 
-            if (dz < hitDz && dx < 1.3) {
-                // Dodge checks
-                const dodgedJump = G.jumping && (playerGroup.position.y > t.jumpTop);
-                const dodgedSlide = G.sliding && (t.slideBottom > 0.9);
-                if (!dodgedJump && !dodgedSlide) {
-                    AudioSystem.collide();
-                    spawnParticles(obs.position, 10, 0xff4444);
-                    triggerCollision(i);
-                    return; // stop game loop body, waiting for quiz
+            // X Dist
+            const dx = Math.abs(obs.position.x - pX);
+            // Z Dist (offset by length)
+            const dz = Math.abs(obs.position.z - pZ);
+
+            if (dx < (box.dx + 0.35) && dz < (box.dz + 0.3)) {
+                // Potential vertical collision
+                const obsTop = box.yOff + (box.dy/2);
+                const obsBot = box.yOff - (box.dy/2);
+                const pTop = pY + (G.sliding ? 0.7 : 1.9);
+                const pBot = pY;
+
+                if (pTop > obsBot && pBot < obsTop) {
+                    // Specific Dodge Logic
+                    const dodgedJump = G.jumping && t.jumpTop && (pBot > t.jumpTop);
+                    const dodgedSlide = G.sliding && t.slideBottom && (t.slideBottom > 1.0);
+                    
+                    if (!dodgedJump && !dodgedSlide) {
+                        AudioSystem.collide();
+                        spawnParticles(obs.position, 10, 0xff4444);
+                        triggerCollision(i);
+                        return;
+                    }
                 }
             }
         }
