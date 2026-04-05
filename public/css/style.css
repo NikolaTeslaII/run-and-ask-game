@@ -30,7 +30,7 @@
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
 html, body {
-    width: 100vw;
+    width: 100%;
     height: 100vh;      /* Fallback cho browser cũ */
     height: 100dvh;     /* Fixed hoàn toàn lỗi scaling URL bar dãn nở trên Safari/Android */
     position: fixed;    /* Cố định không cho nảy màn hình */
