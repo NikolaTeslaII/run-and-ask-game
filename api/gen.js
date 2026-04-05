@@ -10,8 +10,8 @@ module.exports = async function (req, res) {
         return res.status(500).json({ error: 'GEMINI_API_KEY chưa được cấu hình trên Vercel.' });
     }
 
-    // Yêu cầu AI đẻ 10 câu hỏi để đảm bảo tốc độ phản hồi cực nhanh dưới nền
-    const prompt = `Viết 15 câu hỏi trắc nghiệm rèn luyện trí tuệ học sinh cấp 3 (Toán, Lý, Hóa, Văn, Lịch sử, Địa Lý, Kiến thức chung). 
+    // Yêu cầu AI đẻ 8 câu hỏi để đảm bảo tốc độ phản hồi cực nhanh dưới nền (tránh Vercel 10s timeout)
+    const prompt = `Viết 8 câu hỏi trắc nghiệm rèn luyện trí tuệ học sinh cấp 3 (Toán, Lý, Hóa, Văn, Lịch sử, Địa Lý, Kiến thức chung). 
 Mỗi câu có 4 đáp án (A, B, C, D).
 Phải trả về MỘT MẢNG JSON HỢP LỆ THEO ĐÚNG ĐỊNH DẠNG SAU, KHÔNG CÓ BẤT KỲ VĂN BẢN NÀO KHÁC BÊN NGOÀI KHỐI [ ]:
 [
@@ -25,15 +25,16 @@ Phải trả về MỘT MẢNG JSON HỢP LỆ THEO ĐÚNG ĐỊNH DẠNG SAU, K
 TUYỆT ĐỐI CHỈ TRẢ VỀ CHUỖI JSON BẮT ĐẦU VỚI '[' VÀ KẾT THÚC BẰNG ']'. KHÔNG DÙNG MARKDOWN BLOCK CODE (như \`\`\`json).`;
 
     try {
-        const aiRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`, {
+        const aiRes = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-8b:generateContent?key=${apiKey}`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 contents: [{ parts: [{ text: prompt }] }],
                 generationConfig: {
                     temperature: 0.9,
-                    topK: 40,
-                    topP: 0.95
+                    topK: 60,
+                    topP: 0.95,
+                    maxOutputTokens: 800
                 }
             })
         });

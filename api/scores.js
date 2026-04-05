@@ -67,29 +67,39 @@ module.exports = async function handler(req, res) {
 
     // ── POST: Lưu điểm mới ──
     if (req.method === 'POST') {
-        let body = req.body;
-        if (typeof body === 'string') {
-            try { body = JSON.parse(body); } catch (_) {}
-        }
-        if (!body || typeof body !== 'object') {
-            return res.status(400).json({ error: 'Body không hợp lệ' });
-        }
+        let bodyData = '';
+        req.on('data', chunk => {
+            bodyData += chunk.toString();
+        });
+        
+        req.on('end', async () => {
+            let body = {};
+            try { body = bodyData ? JSON.parse(bodyData) : (req.body || {}); } catch (_) {}
 
-        const name = String(body.name || 'Người hùng').substring(0, 15).trim();
-        const score = Number(body.score) || 0;
-        const stats = body.stats || {};
-        const date = new Date().toLocaleDateString('vi-VN');
+            if (!body || typeof body !== 'object' || Object.keys(body).length === 0) {
+                return res.status(400).json({ error: 'Body không hợp lệ hoặc rỗng' });
+            }
 
-        const scores = await readScores();
-        scores.push({ name, score, stats, date });
-        scores.sort((a, b) => b.score - a.score);
-        const top100 = scores.slice(0, 100);
+            const name = String(body.name || 'Người hùng').substring(0, 15).trim();
+            const score = Number(body.score) || 0;
+            const stats = body.stats || {};
+            const date = new Date().toLocaleDateString('vi-VN');
 
-        await writeScores(top100);
+            const scores = await readScores();
+            scores.push({ name, score, stats, date });
+            scores.sort((a, b) => b.score - a.score);
+            const top100 = scores.slice(0, 100);
 
-        const rank = top100.findIndex(s => s.name === name && s.score === score) + 1;
-        return res.status(200).json({ ok: true, rank, total: top100.length });
+            await writeScores(top100);
+
+            const rank = top100.findIndex(s => s.name === name && s.score === score) + 1;
+            return res.status(200).json({ ok: true, rank, total: top100.length });
+        });
+        return; // Đợi callback stream end
     }
 
-    return res.status(405).json({ error: 'Method Not Allowed' });
+    // Nếu là method khác GET/POST/OPTIONS
+    if (req.method !== 'GET' && req.method !== 'OPTIONS') {
+        return res.status(405).json({ error: 'Method Not Allowed' });
+    }
 };
