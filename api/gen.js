@@ -1,4 +1,4 @@
-const fetch = require('node-fetch'); // NOTE: Node 18+ has built in fetch, Vercel uses Node 18+ by default. But just in case, native fetch works.
+// Vercel Node 18+ has native fetch built-in, no imports needed
 
 module.exports = async function (req, res) {
     if (req.method !== 'GET' && req.method !== 'POST') {

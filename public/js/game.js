@@ -1359,13 +1359,6 @@ function triggerGameOver() {
     document.getElementById('hud').classList.remove('active');
     document.getElementById('pause-screen').classList.remove('active');
 
-    saveScore(G.playerName, G.score, {
-        dist: Math.floor(G.dist),
-        coins: G.coins,
-        correct: G.correctAnswers,
-        maxSpeed: Math.floor(G.maxSpeed),
-    });
-
     // Populate game-over UI
     document.getElementById('go-player-name').textContent = G.playerName || 'Người hùng';
     document.getElementById('final-score').textContent = G.score;
@@ -1374,66 +1367,146 @@ function triggerGameOver() {
     document.getElementById('go-correct').textContent = G.correctAnswers;
     document.getElementById('go-max-speed').textContent = Math.floor(G.maxSpeed);
 
-    renderLeaderboard();
+    // Reset rank badge
+    const rankBadge = document.getElementById('go-rank-badge');
+    if (rankBadge) rankBadge.style.display = 'none';
+    const lbLoad = document.getElementById('lb-loading');
+    if (lbLoad) lbLoad.textContent = 'Đang tải...';
+
     document.getElementById('game-over-screen').classList.add('active');
+
+    // Gửi điểm lên server, sau đó lấy và render leaderboard
+    const statsPayload = {
+        dist: Math.floor(G.dist),
+        coins: G.coins,
+        correct: G.correctAnswers,
+        maxSpeed: Math.floor(G.maxSpeed),
+    };
+
+    saveScoreAPI(G.playerName, G.score, statsPayload).then(result => {
+        // Hiện rank toàn cầu nếu có
+        if (result && result.rank) {
+            if (rankBadge) {
+                document.getElementById('go-rank-text').textContent = 'Hạng #' + result.rank;
+                rankBadge.style.display = '';
+            }
+        }
+        // Load và render top leaderboard
+        fetchGlobalScores().then(scores => {
+            renderLeaderboard(scores, G.playerName, G.score);
+        });
+    });
 }
 
 // ═══════════════════════════════════════════
-// 16. LEADERBOARD - LocalStorage WRAPPERS
-//    (Replace body with Firebase/Supabase API calls later)
+// 16. LEADERBOARD - API Backend (toàn cầu)
 // ═══════════════════════════════════════════
-const SCORE_KEY = 'httt_v2_scores';
+const SCORE_KEY = 'httt_v2_scores'; // fallback localStorage
 
-function getScores() {
+function getLocalScores() {
     try { return JSON.parse(localStorage.getItem(SCORE_KEY) || '[]'); }
     catch { return []; }
 }
 
-function saveScore(name, score, stats = {}) {
+async function saveScoreAPI(name, score, stats = {}) {
     if (!name) name = localStorage.getItem('httt_player_name') || 'Người hùng';
-    const scores = getScores();
-    scores.push({ 
-        name: String(name).substring(0, 15), 
-        score: Number(score) || 0, 
-        stats, 
-        date: new Date().toLocaleDateString('vi-VN') 
-    });
-    scores.sort((a, b) => b.score - a.score);
-    localStorage.setItem(SCORE_KEY, JSON.stringify(scores.slice(0, 30)));
-    
-    // Also update total plays
-    const total = parseInt(localStorage.getItem('httt_total_plays') || '0');
-    localStorage.setItem('httt_total_plays', total + 1);
+    const payload = {
+        name: String(name).substring(0, 15),
+        score: Number(score) || 0,
+        stats,
+    };
+
+    // Luôn lưu local trước
+    const local = getLocalScores();
+    local.push({ ...payload, date: new Date().toLocaleDateString('vi-VN') });
+    local.sort((a, b) => b.score - a.score);
+    localStorage.setItem(SCORE_KEY, JSON.stringify(local.slice(0, 30)));
+    localStorage.setItem('httt_total_plays', parseInt(localStorage.getItem('httt_total_plays') || '0') + 1);
+
+    // Gửi lên API
+    try {
+        const res = await fetch('/api/scores', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        if (res.ok) {
+            const data = await res.json();
+            return data; // { ok, rank, total }
+        }
+    } catch (e) {
+        console.warn('[rank] API không khả dụng, dùng localStorage fallback', e.message);
+    }
+    return null;
 }
 
-function renderLeaderboard() {
-    const scores = getScores();
-    const ul = document.getElementById('leaderboard-list');
-    ul.innerHTML = '';
-    const icons = ['1.', '2.', '3.']; 
+async function fetchGlobalScores() {
+    try {
+        const res = await fetch('/api/scores');
+        if (res.ok) return await res.json();
+    } catch (e) {
+        console.warn('[rank] Không lấy được scores từ API', e.message);
+    }
+    return getLocalScores(); // fallback
+}
 
-    if (scores.length === 0) {
+function renderLeaderboard(scores, playerName, playerScore) {
+    const ul = document.getElementById('leaderboard-list');
+    const loadingEl = document.getElementById('lb-loading');
+    ul.innerHTML = '';
+    if (loadingEl) loadingEl.textContent = '';
+
+    if (!scores || scores.length === 0) {
         ul.innerHTML = '<li style="text-align:center;color:var(--c-muted);padding:12px 0">Chưa có điểm nào!</li>';
         return;
     }
 
-    scores.slice(0, 5).forEach((s, i) => {
+    const medals = ['🥇', '🥈', '🥉'];
+    scores.slice(0, 10).forEach((s, i) => {
         const li = document.createElement('li');
-        if (s.name === G.playerName && s.score === G.score) li.classList.add('is-current');
+        const isCurrent = s.name === playerName && s.score === playerScore;
+        if (isCurrent) li.classList.add('is-current');
         li.innerHTML = `
-            <span class="lb-rank">${icons[i] || (i + 1) + '.'}</span>
-            <span class="lb-name">${s.name || 'Người hùng'}</span>
+            <span class="lb-rank">${medals[i] || (i + 1) + '.'}</span>
+            <span class="lb-name">${escHtml(s.name || 'Người hùng')}</span>
             <span class="lb-score">${s.score}</span>
         `;
         ul.appendChild(li);
     });
 }
 
+function renderGlobalRank(scores) {
+    const list = document.getElementById('global-rank-list');
+    const loadingEl = document.getElementById('global-rank-loading');
+    if (!list) return;
+    if (loadingEl) loadingEl.style.display = 'none';
+    list.innerHTML = '';
+    if (!scores || scores.length === 0) {
+        list.innerHTML = '<li style="text-align:center;color:var(--c-muted);padding:12px 0">Chưa có người nào chơi!</li>';
+        return;
+    }
+    const medals = ['🥇', '🥈', '🥉'];
+    scores.forEach((s, i) => {
+        const li = document.createElement('li');
+        li.innerHTML = `
+            <span class="lb-rank">${medals[i] || (i + 1) + '.'}</span>
+            <span class="lb-name">${escHtml(s.name || 'Người hùng')}<small style="margin-left:6px;color:var(--c-muted);font-size:0.7em;">${s.date || ''}</small></span>
+            <span class="lb-score">${s.score}</span>
+        `;
+        list.appendChild(li);
+    });
+}
+
+function escHtml(str) {
+    return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
 function updateStartScreenStats() {
-    const scores = getScores();
-    const total = localStorage.getItem('httt_total_plays') || '0';
-    document.getElementById('stat-total-players').textContent = parseInt(total) + scores.length;
-    document.getElementById('stat-top-score').textContent = scores[0]?.score ?? '—';
+    fetchGlobalScores().then(scores => {
+        const total = localStorage.getItem('httt_total_plays') || '0';
+        document.getElementById('stat-total-players').textContent = scores.length || parseInt(total);
+        document.getElementById('stat-top-score').textContent = scores[0]?.score ?? '—';
+    });
 }
 
 // ═══════════════════════════════════════════
@@ -1603,6 +1676,30 @@ function bindUI() {
         document.getElementById('pause-screen').classList.remove('active');
         triggerGameOver();
     });
+
+    // Global Rank Overlay
+    function openGlobalRank() {
+        const overlay = document.getElementById('global-rank-screen');
+        const loadingEl = document.getElementById('global-rank-loading');
+        const list = document.getElementById('global-rank-list');
+        overlay.classList.add('active');
+        if (loadingEl) loadingEl.style.display = '';
+        if (list) list.innerHTML = '';
+        fetchGlobalScores().then(scores => renderGlobalRank(scores));
+    }
+
+    const btnGlobalRank = document.getElementById('btn-global-rank');
+    if (btnGlobalRank) btnGlobalRank.addEventListener('click', openGlobalRank);
+
+    const btnViewAllRank = document.getElementById('btn-view-all-rank');
+    if (btnViewAllRank) btnViewAllRank.addEventListener('click', openGlobalRank);
+
+    const btnCloseGlobalRank = document.getElementById('btn-close-global-rank');
+    if (btnCloseGlobalRank) {
+        btnCloseGlobalRank.addEventListener('click', () => {
+            document.getElementById('global-rank-screen').classList.remove('active');
+        });
+    }
 
     // Audio controls
     const btnMute = document.getElementById('btn-mute');

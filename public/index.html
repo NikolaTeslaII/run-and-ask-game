@@ -71,9 +71,14 @@
                     <button id="start-btn" class="btn-start">
                         <span class="btn-start-text">BẮT ĐẦU</span>
                     </button>
-                    <button id="btn-create-room" class="btn-outline" style="margin-top:-8px;">
-                        TỰ TẠO PHÒNG (CUSTOM)
-                    </button>
+                    <div style="display:flex;gap:8px;margin-top:-8px;">
+                        <button id="btn-create-room" class="btn-outline" style="flex:1;">
+                            TỰ TẠO PHÒNG
+                        </button>
+                        <button id="btn-global-rank" class="btn-outline" style="flex:1;background:linear-gradient(135deg,rgba(255,215,0,0.15),rgba(255,165,0,0.1));border-color:rgba(255,215,0,0.5);">
+                            🏆 BẢNG XẾP HẠNG
+                        </button>
+                    </div>
 
                     <div class="controls-row">
                         <div class="control-chip"><kbd>←</kbd><kbd>→</kbd> Chuyển làn</div>
@@ -190,10 +195,20 @@
                 </div>
             </div>
 
+            <!-- Rank badge -->
+            <div id="go-rank-badge" class="go-rank-badge" style="display:none;">
+                <span id="go-rank-text">Hạng #?</span>
+                <span class="go-rank-sub">trong bảng xếp hạng toàn cầu</span>
+            </div>
+
             <!-- Leaderboard -->
             <div class="go-lb-section">
-                <div class="lb-header">Bảng Danh Dự</div>
+                <div class="lb-header" style="display:flex;justify-content:space-between;align-items:center;">
+                    <span>🏆 Top Người Chơi</span>
+                    <span id="lb-loading" style="font-size:0.7rem;color:var(--c-muted);font-weight:400;">Đang tải...</span>
+                </div>
                 <ul id="leaderboard-list" class="lb-list"></ul>
+                <button id="btn-view-all-rank" class="btn-outline-sm" style="width:100%;margin-top:8px;font-size:0.75rem;">Xem đầy đủ Top 100 →</button>
             </div>
 
             <!-- Actions -->
@@ -213,12 +228,26 @@
         <div class="pause-card" style="max-width: 500px; text-align: left;">
             <h2 class="form-title" style="margin-bottom: 8px;">Tạo Phòng Câu Hỏi</h2>
             <p style="font-size: 0.8rem; color: var(--c-muted); margin-bottom: 12px;">Dán mảng JSON chứa các câu hỏi của bạn. Định dạng: <br><code>[{"q": "Câu hỏi?", "a": ["A","B","C","D"], "correct": 0, "cat": "Toán"}]</code></p>
-            <textarea id="custom-q-input" style="width: 100%; height: 150px; background: var(--c-surface2); color: var(--c-text); border: 1px solid var(--c-border); padding: 10px; font-family: monospace; border-radius: var(--r-sm); margin-bottom: 16px;" placeholder='[{"q": "1+1=?", "a": ["2","3","4","5"], "correct": 0, "cat": "Math"}]'></textarea>
+            <textarea id="custom-q-input" style="width: 100%; height: 150px; background: var(--c-surface2); color: var(--c-text); border: 1px solid var(--c-border); padding: 10px; font-family: monospace; border-radius: var(--r-sm); margin-bottom: 16px;" placeholder='{"q": "1+1=?", "a": ["2","3","4","5"], "correct": 0, "cat": "Math"}'></textarea>
             <div style="display: flex; gap: 10px;">
                 <button id="btn-save-room" class="btn-start" style="flex:1;">LƯU & SỬ DỤNG</button>
                 <button id="btn-close-room" class="btn-danger" style="flex:1;">ĐÓNG</button>
             </div>
             <div id="room-status" style="margin-top: 12px; font-size: 0.8rem; font-weight: bold;"></div>
+        </div>
+    </div>
+
+    <!-- ══════════════════════════════════════════
+         GLOBAL LEADERBOARD OVERLAY (Top 100)
+    ══════════════════════════════════════════ -->
+    <div id="global-rank-screen" class="screen overlay">
+        <div class="pause-card" style="max-width:520px;max-height:85vh;overflow:hidden;display:flex;flex-direction:column;">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;flex-shrink:0;">
+                <h2 class="form-title" style="margin:0;">🏆 Bảng Xếp Hạng Toàn Cầu</h2>
+                <button id="btn-close-global-rank" class="btn-danger" style="padding:6px 14px;font-size:0.8rem;">✕ Đóng</button>
+            </div>
+            <div id="global-rank-loading" style="text-align:center;padding:24px;color:var(--c-muted);">Đang tải dữ liệu...</div>
+            <ul id="global-rank-list" class="lb-list" style="overflow-y:auto;flex:1;"></ul>
         </div>
     </div>
 

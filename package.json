@@ -1,0 +1,11 @@
+{
+  "name": "run-and-ask",
+  "version": "1.0.0",
+  "description": "Run&Ask - 3D Endless Runner with AI Quiz",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "dev": "vercel dev"
+  }
+}
