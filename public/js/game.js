@@ -1725,12 +1725,17 @@ function bindUI() {
 function onResize() {
     if (!camera || !renderer) return;
     const root = document.getElementById('game-root');
-    if (!root) return;
-    const w = root.clientWidth || window.innerWidth;
-    const h = root.clientHeight || window.innerHeight;
+    const w = window.innerWidth;
+    const h = window.innerHeight;
+    
+    if (root) {
+        root.style.width = w + 'px';
+        root.style.height = h + 'px';
+    }
+
     camera.aspect = w / h;
     camera.updateProjectionMatrix();
-    renderer.setSize(w, h, false); // false to avoid overriding inline styles heavily
+    renderer.setSize(w, h, true);
 }
 
 // ═══════════════════════════════════════════
